@@ -13,6 +13,18 @@
     "cooldown": 2.0
   },
   {
+    "name": "set_continue",
+    "file": "set_continue.png",
+    "threshold": 0.85,
+    "cooldown": 2.0
+  },
+  {
+    "name": "back_to_level",
+    "file": "back_to_level.png",
+    "threshold": 0.85,
+    "cooldown": 2.0
+  },
+  {
     "name": "tutorial_claim_bonus",
     "file": "tutorial_claim_bonus.png",
     "threshold": 0.85,
@@ -45,6 +57,7 @@
     "name": "close_x_grey",
     "file": "close_x_grey.png",
     "threshold": 0.88,
-    "cooldown": 1.5
+    "cooldown": 1.5,
+    "confirm": 8
   }
 ]

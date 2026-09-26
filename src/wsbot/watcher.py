@@ -28,6 +28,7 @@ from .log import log
 SCALE = 0.5  # match on a half-res frame: ~4x faster, still plenty of detail for buttons
 UNKNOWN_AFTER_S = 8.0  # board hidden and nothing matched this long -> unknown overlay
 APP_CHECK_EVERY_S = 5.0
+ACTION_SETTLE_S = 1.0  # after tapping a popup, give it this long to disappear
 
 
 @dataclass
@@ -40,7 +41,9 @@ class Popup:
     tap: bool
     tap_point: tuple[int, int] | None = None  # tap here instead of the match center
     allow: str | None = None  # forbidden zone this entry may tap (see device.py)
+    confirm: int = 1  # consecutive matching frames required before acting
     last_hit: float = 0.0
+    streak: int = 0
 
 
 def load_popups(folder: Path) -> list[Popup]:
@@ -63,6 +66,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 tap=e.get("tap", True),
                 tap_point=tuple(e["tap_point"]) if "tap_point" in e else None,
                 allow=e.get("allow"),
+                confirm=e.get("confirm", 1),
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -88,7 +92,7 @@ class PopupWatcher(threading.Thread):
         self.stop_event = threading.Event()
         self.idle = threading.Event()  # set while the bot sleeps until its next day
         self.level_done = threading.Event()
-        self.popup_active = threading.Event()
+        self.last_action = 0.0  # monotonic time the watcher last tapped a popup
         self.hits: Counter[str] = Counter()
         self.last_match = 0.0  # monotonic time any popup template last matched
         self.board_visible = False
@@ -143,7 +147,12 @@ class PopupWatcher(threading.Thread):
             self.fps = 0.8 * self.fps + 0.2 * (1 / dt if dt > 0 else 0)
         log("WATCHER", "stopped")
 
+    def busy(self) -> bool:
+        """True right after the watcher tapped something: give that popup time to go."""
+        return time.monotonic() - self.last_action < ACTION_SETTLE_S
+
     def _tick(self) -> None:
+        t0 = time.monotonic()
         frame = self.device.frame()
         now = time.monotonic()
         self.board_visible = self._board_visible(frame)
@@ -152,36 +161,15 @@ class PopupWatcher(threading.Thread):
             self._frame_cond.notify_all()
 
         small = cv2.resize(frame, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
-        matched = False
-        for popup in self.popups:
-            try:
-                score, center = match(small, popup)
-            except Exception as exc:
-                log("ERROR", f"match {popup.name} failed: {exc!r}")
-                continue
-            if score < popup.threshold:
-                continue
-            matched = True
-            self.last_match = now
-            if now - popup.last_hit < popup.cooldown:
-                continue
-            popup.last_hit = now
-            self.hits[popup.name] += 1
-            log("WATCHER", f"{popup.name} score={score:.2f} at {center}")
-            if popup.level_done:
-                self.level_done.set()
-            if popup.tap:
-                self.popup_active.set()
-                target = popup.tap_point or center
-                self.device.tap(*target, why=popup.name, allow=popup.allow)
-            break  # one action per frame; the next frame shows what's under it
-
+        matched = self._handle_popups(small, now)
         if matched or self.board_visible:
             self._hidden_since = None
-            if not matched:
-                self.popup_active.clear()
         else:
             self._check_unknown(frame, now)
+
+        took = time.monotonic() - t0
+        if took > 2.0:
+            log("WARN", f"slow watcher tick {took:.1f}s (screenshot {now - t0:.1f}s)")
 
         if now - self._last_app_check > APP_CHECK_EVERY_S:
             self._last_app_check = now
@@ -196,6 +184,40 @@ class PopupWatcher(threading.Thread):
         if panel is None:
             return False
         return all(abs(a - b) <= 12 for a, b in zip(panel, expected, strict=True))
+
+    def _handle_popups(self, small: np.ndarray, now: float) -> bool:
+        """Act on the highest-priority popup that is on screen. True if any matched."""
+        hit = None
+        for popup in self.popups:
+            try:
+                score, center = match(small, popup)
+            except Exception as exc:
+                log("ERROR", f"match {popup.name} failed: {exc!r}")
+                continue
+            if score >= popup.threshold:
+                popup.streak += 1
+                if hit is None:
+                    hit = (popup, score, center)
+            else:
+                popup.streak = 0
+        if hit is None:
+            return False
+        popup, score, center = hit
+        self.last_match = now
+        # The top match owns this frame even while cooling down or unconfirmed, so a
+        # lower-priority button (like a close X) never jumps ahead of it.
+        if popup.streak < popup.confirm or now - popup.last_hit < popup.cooldown:
+            return True
+        popup.last_hit = now
+        self.hits[popup.name] += 1
+        log("WATCHER", f"{popup.name} score={score:.2f} at {center}")
+        if popup.level_done:
+            self.level_done.set()
+        if popup.tap:
+            self.last_action = now
+            target = popup.tap_point or center
+            self.device.tap(*target, why=popup.name, allow=popup.allow)
+        return True
 
     def _check_unknown(self, frame: np.ndarray, now: float) -> None:
         if self._hidden_since is None:
@@ -213,4 +235,4 @@ class PopupWatcher(threading.Thread):
         if pkg and pkg != self.package:
             log("RECOVERY", f"foreground is {pkg}, relaunching {self.package}")
             if not self.device.dry_run:
-                self.device.d.app_start(self.package)
+                self.device.app_start(self.package)

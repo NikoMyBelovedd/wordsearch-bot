@@ -31,6 +31,8 @@ from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
 MAX_DIAGNOSTICS = 150  # newest dumps kept; a 10-day run must not fill the disk
+HIDDEN_END_S = 1.5  # board gone this long after a pass = the level is over
+STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finished
 
 
 @dataclass
@@ -107,6 +109,7 @@ class Bot:
         deadline = start + timeout
         last_time, prev = 0.0, None
         hidden_since = last_clear = last_report = start
+        stale_since: float | None = None
         why = "no frame yet"
         while not self.stop_event.is_set() and time.monotonic() < deadline:
             now = time.monotonic()
@@ -125,7 +128,7 @@ class Bot:
             elif self._should_clear_tap(now, hidden_since, last_clear):
                 last_clear = now
                 self._clear_tap()
-            if self.watcher.popup_active.is_set():
+            if self.watcher.busy():
                 prev, why = None, "watcher is handling a popup"
                 continue
             grid = self.read_grid(board) if board else None
@@ -136,8 +139,14 @@ class Bot:
                 prev, why = None, "letters unreadable"
                 continue
             if grid == different_from:
-                prev, why = None, "still the previous level"
-                continue
+                stale_since = stale_since or now
+                if now - stale_since < STALE_PREVIOUS_S:
+                    prev, why = None, "still the previous level"
+                    continue
+                log("WARN", "the previous level is still on screen; solving it again")
+                different_from = None
+            else:
+                stale_since = None
             if grid == prev:
                 x, y, w, h = board.panel
                 self.board_center = (x + w // 2, y + h // 2)
@@ -180,7 +189,7 @@ class Bot:
                 continue
             if self.watcher.level_done.is_set():
                 return False
-            if self.watcher.board_visible and not self.watcher.popup_active.is_set():
+            if self.watcher.board_visible and not self.watcher.busy():
                 self.status = "solving"
                 return True
             # Board hidden: a popup, or the level is finishing. Wait it out, then
@@ -256,15 +265,37 @@ class Bot:
         return [h for h in hits if not set(path_cells(h)) <= lit]
 
     def _wait_level_end(self, grid: list[str], timeout: float) -> bool:
-        """True once the board is gone or shows a different grid."""
+        """True once the level has really ended.
+
+        One odd frame (a banner over the board, a misread glyph) must not count, or the
+        bot moves on while the level is unfinished and then waits forever for a "new"
+        board. So: the watcher saw a level-end button, or the board stayed hidden for
+        HIDDEN_END_S, or a different grid read identically twice in a row.
+        """
         deadline = time.monotonic() + timeout
+        hidden_since: float | None = None
+        other: list[str] | None = None
         while not self.stop_event.is_set() and time.monotonic() < deadline:
-            if self.watcher.level_done.is_set() or not self.watcher.board_visible:
+            if self.watcher.level_done.is_set():
                 return True
             frame = self.watcher.latest(newer_than=self.watcher.frame_time, timeout=1.0)
-            board = read_board(frame) if frame is not None else None
-            if board and self.read_grid(board) != grid:
+            if frame is None:
+                continue
+            now = time.monotonic()
+            board = read_board(frame)
+            if board is None:
+                hidden_since = hidden_since or now
+                if now - hidden_since >= HIDDEN_END_S:
+                    return True
+                continue
+            hidden_since = None
+            read = self.read_grid(board)
+            if read is None or read == grid:
+                other = None
+                continue
+            if read == other:
                 return True
+            other = read
         return False
 
     # ---- main loop -------------------------------------------------------------
@@ -292,6 +323,7 @@ class Bot:
                         break
                     self._dump("no_board")
                     self.restart_app("no board for a long time")
+                    previous = None
                     continue
 
                 self.watcher.level_done.clear()
@@ -331,9 +363,9 @@ class Bot:
         log("RECOVERY", f"restarting the game: {why}")
         self.status = "restarting game"
         if not self.device.dry_run:
-            self.device.d.app_stop(PACKAGE)
+            self.device.app_stop(PACKAGE)
             time.sleep(1.0)
-            self.device.d.app_start(PACKAGE)
+            self.device.app_start(PACKAGE)
         time.sleep(4.0)
 
     def _sleep_until_tomorrow(self) -> None:

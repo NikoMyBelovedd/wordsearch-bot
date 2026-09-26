@@ -11,8 +11,10 @@ because there is no adb process to spawn per gesture.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -21,6 +23,7 @@ import uiautomator2 as u2
 from .log import log
 
 CALIB_W, CALIB_H = 1080, 2400
+U2_TIMEOUT_S = 2.5
 
 # Rectangles (x1, y1, x2, y2) in calibration space that must never receive input:
 # controls that spend coins or leave the level. The star is the (free) bonus-word jar;
@@ -89,6 +92,8 @@ class Device:
         self.input_lock = threading.Lock()
         self.d = u2.connect(serial)
         self.shell = ShellInput(serial)
+        self._u2_busy = threading.Event()
+        self._u2_retry_at = 0.0
         w, h = self.d.window_size()
         self.width, self.height = w, h
         self.sx, self.sy = w / CALIB_W, h / CALIB_H
@@ -101,11 +106,17 @@ class Device:
         self.refused = 0
         log("DEVICE", f"connected {serial} {w}x{h} dry_run={dry_run}")
 
+    def adb(self, *args: str, timeout: float = 10.0) -> subprocess.CompletedProcess[bytes]:
+        """One-shot adb command with a hard timeout (never hangs the caller)."""
+        return subprocess.run(
+            ["adb", "-s", self.serial, *args], capture_output=True, timeout=timeout, check=False
+        )
+
     def reconnect(self) -> None:
         """Rebuild both device channels after adb/uiautomator trouble."""
         log("RECOVERY", f"reconnecting to {self.serial}")
         try:
-            subprocess.run(["adb", "-s", self.serial, "wait-for-device"], timeout=60)
+            self.adb("wait-for-device", timeout=60)
             self.d = u2.connect(self.serial)
         except Exception as exc:
             log("ERROR", f"reconnect failed: {exc!r}")
@@ -115,14 +126,63 @@ class Device:
     # ---- frames -------------------------------------------------------------
 
     def frame(self) -> np.ndarray:
-        """Current screen as a BGR array, resized to calibration space if needed."""
-        img = self.d.screenshot(format="opencv")
+        """Current screen as a BGR array in calibration space.
+
+        uiautomator2 is fastest (~115 ms) but silently restarts its on-device server
+        when unhappy, which can block for 30 s+. So each u2 grab runs under a guard:
+        past U2_TIMEOUT_S we switch to raw `screencap` (~240 ms, hard timeout) and give
+        u2 time to recover in the background.
+        """
+        img = None
+        if time.monotonic() >= self._u2_retry_at and not self._u2_busy.is_set():
+            img = self._u2_frame()
+        if img is None:
+            img = self._screencap_frame()
         if img.shape[1] != CALIB_W or img.shape[0] != CALIB_H:
             img = cv2.resize(img, (CALIB_W, CALIB_H), interpolation=cv2.INTER_AREA)
         return img
 
+    def _u2_frame(self) -> np.ndarray | None:
+        box: list[np.ndarray] = []
+
+        def grab() -> None:
+            try:
+                box.append(self.d.screenshot(format="opencv"))
+            except Exception as exc:
+                log("WARN", f"u2 screenshot failed: {exc!r}")
+            finally:
+                self._u2_busy.clear()
+
+        self._u2_busy.set()
+        worker = threading.Thread(target=grab, daemon=True, name="u2-frame")
+        worker.start()
+        worker.join(U2_TIMEOUT_S)
+        if box:
+            return box[0]
+        if worker.is_alive():
+            log("WARN", f"u2 screenshot stuck >{U2_TIMEOUT_S}s; using screencap for a while")
+        self._u2_retry_at = time.monotonic() + 60
+        return None
+
+    def _screencap_frame(self) -> np.ndarray:
+        raw = self.adb("exec-out", "screencap", timeout=8).stdout
+        if len(raw) < 16:
+            raise RuntimeError("screencap returned no data")
+        w, h = (int(v) for v in np.frombuffer(raw[:8], dtype=np.uint32))
+        pixels = np.frombuffer(raw[len(raw) - w * h * 4 :], dtype=np.uint8)
+        return cv2.cvtColor(pixels.reshape(h, w, 4), cv2.COLOR_RGBA2BGR)
+
     def foreground(self) -> str:
-        return self.d.app_current().get("package", "")
+        """Package of the resumed activity ('' if unknown)."""
+        out = self.adb("shell", "dumpsys activity activities | grep -m1 topResumedActivity")
+        match = re.search(r" ([\w.]+)/", out.stdout.decode(errors="ignore"))
+        return match.group(1) if match else ""
+
+    def app_start(self, package: str) -> None:
+        self.adb("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
+
+    def app_stop(self, package: str) -> None:
+        self.adb("shell", "am", "force-stop", package)
 
     # ---- input --------------------------------------------------------------
 
