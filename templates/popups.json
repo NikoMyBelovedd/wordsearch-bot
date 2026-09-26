@@ -1,0 +1,15 @@
+[
+  {
+    "name": "next_level",
+    "file": "next_level.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "level_done": true
+  },
+  {
+    "name": "got_it",
+    "file": "got_it.png",
+    "threshold": 0.85,
+    "cooldown": 1.5
+  }
+]
