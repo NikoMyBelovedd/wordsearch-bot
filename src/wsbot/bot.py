@@ -1,13 +1,21 @@
 """Main script: read the board, fire every candidate word, wait for the next level.
 
-READ_BOARD -> BURST -> WAIT_NEXT, forever. The popup-watcher runs beside it and
-owns every screenshot; this thread only reads its frames and swipes.
+READ_BOARD -> SOLVE -> NEXT, until the goal is met. The popup-watcher runs beside it
+and owns every screenshot; this thread only reads its frames and swipes.
+
+Solving escalates through passes until the level ends:
+  1. fast        every dictionary word once (best-ranked path), back to back
+  2. unfound     words not yet highlighted, every path, a little slower
+  3. exhaustive  every straight line of 3+ letters with an unlit cell: finds words
+                 the dictionary doesn't know, so no level can block the run
+  4. restart     relaunch the app and start the level over
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,23 +23,26 @@ import cv2
 
 from .board import Board, highlighted, read_board
 from .device import Device
+from .goal import Goal, seconds_until_midnight
 from .letters import LetterReader
 from .log import log
-from .solver import Dictionary, Hit
+from .solver import DIRECTIONS, MIN_LEN, Dictionary, Hit
 from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
+MAX_DIAGNOSTICS = 150  # newest dumps kept; a 10-day run must not fill the disk
 
 
 @dataclass
 class Pacing:
-    swipe_s: float = 0.20  # finger travel time per swipe
-    gap_s: float = 0.15  # pause after each swipe
-    refire_gap_s: float = 0.7  # slower refires land after word-found animations
-    settle_s: float = 0.4  # pause after a popup clears before swiping again
-    clear_tap_s: float = 2.5  # board hidden this long with no known popup -> tap its center
+    swipe_ms: int = 60  # finger travel time per swipe (the game takes 40 ms fine)
+    gap_s: float = 0.0  # pause after each swipe; the game never blocks input on a find
+    refire_swipe_ms: int = 120  # later passes go slower, in case speed caused a miss
+    refire_gap_s: float = 0.1
+    settle_s: float = 0.3  # pause after a popup clears before swiping again
+    clear_tap_s: float = 2.5  # board hidden this long with no known popup -> clear tap
     level_end_s: float = 2.5  # how long to wait for the level to end after a pass
-    next_level_timeout_s: float = 20.0
+    no_board_restart_s: float = 150.0  # no board at all this long -> restart the app
 
 
 @dataclass
@@ -39,12 +50,17 @@ class Stats:
     started: float = field(default_factory=time.monotonic)
     levels: int = 0
     swipes: int = 0
-    level_times: list[float] = field(default_factory=list)
+    restarts: int = 0
+    level_times: deque[float] = field(default_factory=lambda: deque(maxlen=200))
+
+    def avg_level_s(self) -> float:
+        return sum(self.level_times) / len(self.level_times) if self.level_times else 0.0
 
 
 class Bot:
-    def __init__(self, serial: str, root: Path, *, dry_run: bool = False) -> None:
+    def __init__(self, serial: str, root: Path, goal: Goal, *, dry_run: bool = False) -> None:
         self.root = root
+        self.goal = goal
         self.device = Device(serial, dry_run=dry_run)
         self.diagnostics = root / "diagnostics"
         self.diagnostics.mkdir(exist_ok=True)
@@ -57,10 +73,13 @@ class Bot:
         self.pause_event = threading.Event()
         # Live state for the UI.
         self.grid: list[str] = []
-        self.hits: list[Hit] = []
-        self.fired: set[str] = set()
-        self.status = "idle"
+        self.fired_cells: set[tuple[int, int]] = set()
+        self.found_cells: set[tuple[int, int]] = set()
+        self.status = "starting"
+        self.phase = ""
+        self.level_started = 0.0
         self.board_center = (540, 1325)  # middle of the board; updated each level
+        self.clear_taps = 0
 
     # ---- board ---------------------------------------------------------------
 
@@ -80,16 +99,23 @@ class Bot:
     def wait_for_board(self, *, different_from: list[str] | None = None, timeout: float = 20.0):
         """Block until two consecutive frames show the same readable board.
 
-        While the board stays hidden and no known popup is being handled, tap the middle
-        of the board every few seconds: the game's tutorial and bonus popups close on
-        any click, so this clears them without a template for each one.
+        While the board stays hidden and no known popup is being handled, tap to clear:
+        the game's tutorial and bonus popups close on any click, so this handles them
+        without a template for each one.
         """
-        deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        deadline = start + timeout
         last_time, prev = 0.0, None
-        hidden_since = last_clear = time.monotonic()
+        hidden_since = last_clear = last_report = start
+        why = "no frame yet"
         while not self.stop_event.is_set() and time.monotonic() < deadline:
+            now = time.monotonic()
+            if now - last_report >= 5:
+                last_report = now
+                log("WAIT", f"no board for {now - start:.0f}s: {why}")
             frame = self.watcher.latest(newer_than=last_time)
             if frame is None:
+                why = "watcher produced no frame"
                 continue
             last_time = self.watcher.frame_time
             board = read_board(frame)
@@ -98,20 +124,42 @@ class Bot:
                 hidden_since = now
             elif self._should_clear_tap(now, hidden_since, last_clear):
                 last_clear = now
-                self.device.tap(*self.board_center, why="clear popup (board center)")
+                self._clear_tap()
             if self.watcher.popup_active.is_set():
-                prev = None
+                prev, why = None, "watcher is handling a popup"
                 continue
             grid = self.read_grid(board) if board else None
-            if grid is None or grid == different_from:
-                prev = None
+            if board is None:
+                prev, why = None, "board not visible"
+                continue
+            if grid is None:
+                prev, why = None, "letters unreadable"
+                continue
+            if grid == different_from:
+                prev, why = None, "still the previous level"
                 continue
             if grid == prev:
                 x, y, w, h = board.panel
                 self.board_center = (x + w // 2, y + h // 2)
                 return board, grid
+            why = (
+                "waiting for a second matching read"
+                if prev is None
+                else f"reads disagree: {'/'.join(prev)} vs {'/'.join(grid)}"
+            )
             prev = grid
         return None, None
+
+    # Where the clear tap alternates: the board center clears most popups, but tutorial
+    # boxes sit right over it and only close on a tap outside them (the hint card area).
+    ABOVE_BOARD = (540, 620)
+
+    def _clear_tap(self) -> None:
+        if self.clear_taps % 2 == 0:
+            self.device.tap(*self.board_center, why="clear popup (board center)")
+        else:
+            self.device.tap(*self.ABOVE_BOARD, why="clear popup (above board)")
+        self.clear_taps += 1
 
     def _should_clear_tap(self, now: float, hidden_since: float, last_clear: float) -> bool:
         wait = self.pacing.clear_tap_s
@@ -127,124 +175,85 @@ class Bot:
         """Hold while a popup or pause is up. False means the level is over."""
         while not self.stop_event.is_set():
             if self.pause_event.is_set():
+                self.status = "paused"
                 time.sleep(0.2)
                 continue
             if self.watcher.level_done.is_set():
                 return False
             if self.watcher.board_visible and not self.watcher.popup_active.is_set():
+                self.status = "solving"
                 return True
             # Board hidden: a popup, or the level is finishing. Wait it out, then
             # make sure it's still the same board before swiping again.
             self.status = "waiting for popup"
-            _, new_grid = self.wait_for_board(timeout=self.pacing.next_level_timeout_s)
+            t0 = time.monotonic()
+            _, new_grid = self.wait_for_board(timeout=20)
             if new_grid != grid:
                 return False
+            log("PAUSE", f"board was hidden {time.monotonic() - t0:.1f}s; resuming")
             time.sleep(self.pacing.settle_s)
-            self.status = "solving"
         return False
 
-    def burst(self, board: Board, grid: list[str], hits: list[Hit], gap: float) -> bool:
+    def burst(self, board: Board, grid: list[str], hits: list[Hit], ms: int, gap: float) -> bool:
         """Swipe every hit in order. True if all were fired without the level ending."""
         for hit in hits:
             if not self._ready_to_swipe(grid):
                 return False
             ok = self.device.swipe(
-                board.cell(*hit.start).center,
-                board.cell(*hit.end).center,
-                self.pacing.swipe_s,
-                why=hit.word,
+                board.cell(*hit.start).center, board.cell(*hit.end).center, ms, why=hit.word
             )
             if ok:
-                self.fired.add(hit.word)
                 self.stats.swipes += 1
-            time.sleep(gap)
+                self.fired_cells.update(path_cells(hit))
+            if gap:
+                time.sleep(gap)
         return True
 
-    # ---- main loop -------------------------------------------------------------
-
-    def run(self) -> None:
-        self.watcher.start()
-        previous: list[str] | None = None
-        level_n = 0
-        try:
-            while not self.stop_event.is_set():
-                self.status = "reading board"
-                board, grid = self.wait_for_board(different_from=previous, timeout=60)
-                if board is None:
-                    if self.stop_event.is_set():
-                        break
-                    log("WARN", "no new board within 60s; still waiting")
-                    self._dump("no_board")
-                    continue
-                self.watcher.level_done.clear()
-                level_n += 1
-                t0 = time.monotonic()
-                self.grid, self.fired = grid, set()
-                self.hits = self.words.solve(grid)
-                log(
-                    "LEVEL",
-                    f"#{level_n} {board.rows}x{board.cols} {'/'.join(grid)} "
-                    f"-> {len(self.hits)} candidates",
-                )
-                self.status = "solving"
-
-                finished = self.solve_level(board, grid)
-                if not finished:
-                    self._dump("level_stuck")
-                    log("ERROR", "level still not done after all passes; waiting for help")
-                    self._wait_level_end(grid, timeout=float("inf"))
-                if self.stop_event.is_set():
-                    break
-
-                dt = time.monotonic() - t0
-                self.stats.levels += 1
-                self.stats.level_times.append(dt)
-                log("LEVEL", f"#{level_n} done in {dt:.1f}s ({len(self.fired)} swipes)")
-                previous = grid
-        finally:
-            self.watcher.stop()
-            self.status = "stopped"
+    # ---- level solving ---------------------------------------------------------
 
     def solve_level(self, board: Board, grid: list[str]) -> bool:
-        """Fast blind pass, then targeted slow refires. True once the level ends."""
+        """Escalating passes (see module docstring). True once the level ends."""
+        hits = self.words.solve(grid)
+        seen: set[str] = set()
+        fast = [h for h in hits if not (h.word in seen or seen.add(h.word))]
+        p = self.pacing
         passes = [
-            ("fast", self.pacing.gap_s, False),
-            ("refire-unfound", self.pacing.refire_gap_s, True),
-            ("refire-all", self.pacing.refire_gap_s, False),
+            ("fast", lambda: fast, p.swipe_ms, p.gap_s),
+            ("unfound", lambda: self._unlit(board, hits), p.refire_swipe_ms, p.refire_gap_s),
+            ("exhaustive", lambda: self._unlit(board, all_lines(grid)), p.swipe_ms, p.gap_s),
         ]
-        for name, gap, only_unfound in passes:
-            hits = self.hits
-            if only_unfound:
-                hits = self._unfound(board, grid)
-                log("PASS", f"{name}: {len(hits)} of {len(self.hits)} candidates not highlighted")
-            elif name != "fast":
-                log("PASS", f"{name}: {len(hits)} candidates")
-            if not self.burst(board, grid, hits, gap):
+        for name, pick, ms, gap in passes:
+            todo = pick()
+            self.phase = f"{name} ({len(todo)})"
+            if name != "fast":
+                log("PASS", f"{name}: {len(todo)} swipes")
+            if not self.burst(board, grid, todo, ms, gap):
                 return True
-            self.status = "waiting for level end"
-            if self._wait_level_end(grid, timeout=self.pacing.level_end_s):
+            if self._wait_level_end(grid, timeout=p.level_end_s):
                 return True
         return False
 
-    def _unfound(self, board: Board, grid: list[str]) -> list[Hit]:
-        """Candidates with at least one cell not yet covered by a found-word pill."""
-        frame = self.watcher.latest(newer_than=time.monotonic())
-        if frame is None or read_board(frame) is None:
-            return self.hits
-        lit = {
-            (r, c)
-            for r in range(board.rows)
-            for c in range(board.cols)
-            if highlighted(frame, board, r, c)
-        }
-        out = []
-        for hit in self.hits:
-            (r0, c0), (r1, c1) = hit.start, hit.end
-            n = max(abs(r1 - r0), abs(c1 - c0))
-            dr, dc = (r1 - r0) // n, (c1 - c0) // n
-            if any((r0 + i * dr, c0 + i * dc) not in lit for i in range(n + 1)):
-                out.append(hit)
-        return out
+    def _lit_cells(self, board: Board) -> set[tuple[int, int]] | None:
+        """Cells covered by a found-word pill, read from a frame where the board is up."""
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not self.stop_event.is_set():
+            frame = self.watcher.latest(newer_than=time.monotonic())
+            if frame is not None and self.watcher.board_visible:
+                return {
+                    (r, c)
+                    for r in range(board.rows)
+                    for c in range(board.cols)
+                    if highlighted(frame, board, r, c)
+                }
+        return None
+
+    def _unlit(self, board: Board, hits: list[Hit]) -> list[Hit]:
+        """Hits with at least one cell not yet covered by a found-word pill."""
+        lit = self._lit_cells(board)
+        if lit is None:
+            return hits
+        self.found_cells = lit
+        return [h for h in hits if not set(path_cells(h)) <= lit]
 
     def _wait_level_end(self, grid: list[str], timeout: float) -> bool:
         """True once the board is gone or shows a different grid."""
@@ -258,9 +267,113 @@ class Bot:
                 return True
         return False
 
+    # ---- main loop -------------------------------------------------------------
+
+    def run(self) -> None:
+        self.watcher.start()
+        previous: list[str] | None = None
+        restarts_this_level = 0
+        try:
+            while not self.stop_event.is_set():
+                if self.goal.finished():
+                    log("GOAL", f"target reached: {self.goal.title}")
+                    break
+                if self.goal.quota_reached_today():
+                    self._sleep_until_tomorrow()
+                    continue
+
+                self.status = "reading board"
+                self.phase = ""
+                board, grid = self.wait_for_board(
+                    different_from=previous, timeout=self.pacing.no_board_restart_s
+                )
+                if board is None:
+                    if self.stop_event.is_set():
+                        break
+                    self._dump("no_board")
+                    self.restart_app("no board for a long time")
+                    continue
+
+                self.watcher.level_done.clear()
+                self.watcher.expected_panel = board.panel
+                self.device.below_board_y = board.panel[1] + board.panel[3] + 5
+                self.grid, self.fired_cells, self.found_cells = grid, set(), set()
+                self.level_started = t0 = time.monotonic()
+                n = self.goal.done_total + 1
+                log("LEVEL", f"#{n} {board.rows}x{board.cols} {'/'.join(grid)}")
+                self.status = "solving"
+                finished = self.solve_level(board, grid)
+                self.watcher.expected_panel = None
+                self.device.below_board_y = None
+                if self.stop_event.is_set():
+                    break
+                if not finished:
+                    restarts_this_level += 1
+                    self._dump("level_stuck")
+                    self.restart_app(f"level stuck after every pass (try {restarts_this_level})")
+                    previous = None  # the same level comes back after a restart
+                    continue
+
+                restarts_this_level = 0
+                dt = time.monotonic() - t0
+                self.stats.levels += 1
+                self.stats.level_times.append(dt)
+                self.goal.record_level()
+                log("LEVEL", f"#{n} done in {dt:.1f}s · today {self.goal.done_today}")
+                previous = grid
+        finally:
+            self.watcher.stop()
+            self.device.shell.close()
+            self.status = "stopped"
+
+    def restart_app(self, why: str) -> None:
+        self.stats.restarts += 1
+        log("RECOVERY", f"restarting the game: {why}")
+        self.status = "restarting game"
+        if not self.device.dry_run:
+            self.device.d.app_stop(PACKAGE)
+            time.sleep(1.0)
+            self.device.d.app_start(PACKAGE)
+        time.sleep(4.0)
+
+    def _sleep_until_tomorrow(self) -> None:
+        wait = seconds_until_midnight() + 5
+        log("GOAL", f"today's {self.goal.per_day:,} levels done; resuming in {wait / 3600:.1f}h")
+        self.status = "daily target reached · resumes at midnight"
+        self.watcher.idle.set()  # stop screenshotting while there's nothing to do
+        self.stop_event.wait(wait)
+        self.watcher.idle.clear()
+
     def _dump(self, why: str) -> None:
         frame = self.watcher.frame
-        if frame is not None:
-            path = self.diagnostics / f"{why}_{time.strftime('%Y%m%d_%H%M%S')}.png"
-            cv2.imwrite(str(path), frame)
-            log("DIAG", f"saved {path.name}")
+        if frame is None:
+            return
+        path = self.diagnostics / f"{why}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        cv2.imwrite(str(path), frame)
+        log("DIAG", f"saved {path.name}")
+        dumps = sorted(self.diagnostics.glob("*.png"), key=lambda p: p.stat().st_mtime)
+        for old in dumps[:-MAX_DIAGNOSTICS]:
+            old.unlink(missing_ok=True)
+
+
+def path_cells(hit: Hit) -> list[tuple[int, int]]:
+    (r0, c0), (r1, c1) = hit.start, hit.end
+    n = max(abs(r1 - r0), abs(c1 - c0))
+    dr, dc = (r1 - r0) // n, (c1 - c0) // n
+    return [(r0 + i * dr, c0 + i * dc) for i in range(n + 1)]
+
+
+def all_lines(grid: list[str]) -> list[Hit]:
+    """Every straight segment of MIN_LEN+ cells, as pseudo-hits (common word lengths first)."""
+    rows, cols = len(grid), len(grid[0])
+    out = []
+    for r in range(rows):
+        for c in range(cols):
+            for dr, dc in DIRECTIONS:
+                word, rr, cc = "", r, c
+                while 0 <= rr < rows and 0 <= cc < cols:
+                    word += grid[rr][cc]
+                    if len(word) >= MIN_LEN:
+                        out.append(Hit(abs(len(word) - 5), word, (r, c), (rr, cc)))
+                    rr, cc = rr + dr, cc + dc
+    return sorted(out)

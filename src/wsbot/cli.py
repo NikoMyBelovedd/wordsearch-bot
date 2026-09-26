@@ -17,6 +17,10 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="wsbot", description="Word Search Explorer auto-solver")
     p.add_argument("--serial", help="ADB serial (default: $WSBOT_SERIAL or emulator-5554)")
     p.add_argument("--headless", action="store_true", help="run without the TUI")
+    p.add_argument(
+        "--mode", choices=["play", "custom", "single"], default="play", help="--headless goal"
+    )
+    p.add_argument("--per-day", type=int, default=1000, help="--mode custom: levels per day")
     p.add_argument("--dry-run", action="store_true", help="decide everything, touch nothing")
     p.add_argument("--diagnose", action="store_true", help="score every template on this frame")
     p.add_argument("--calibrate", action="store_true", help="save an annotated overlay")
@@ -33,17 +37,31 @@ def main() -> None:
 
         return diag(serial, ROOT, overlay=args.calibrate)
     if args.headless:
-        return headless(serial, args.dry_run)
+        return headless(serial, args.mode, args.per_day, args.dry_run)
 
     from .tui import run_tui
 
     run_tui(serial, ROOT, dry_run=args.dry_run)
 
 
-def headless(serial: str, dry_run: bool) -> None:
-    from .bot import Bot
+def make_goal(mode: str, per_day: int):
+    from .goal import Goal, Progress
 
-    bot = Bot(serial, ROOT, dry_run=dry_run)
+    progress = Progress(ROOT / "local" / "progress.json")
+    if mode == "custom":
+        return Goal.custom(progress, per_day)
+    if mode == "single":
+        return Goal.single(progress)
+    return Goal.play(progress)
+
+
+def headless(serial: str, mode: str, per_day: int, dry_run: bool) -> None:
+    from .bot import Bot
+    from .log import file_sink, set_sinks, stdout_sink
+
+    (ROOT / "local").mkdir(exist_ok=True)
+    set_sinks(stdout_sink, file_sink(ROOT / "local" / "wsbot.log"))
+    bot = Bot(serial, ROOT, make_goal(mode, per_day), dry_run=dry_run)
     signal.signal(signal.SIGINT, lambda *_: bot.stop_event.set())
     bot.run()
 

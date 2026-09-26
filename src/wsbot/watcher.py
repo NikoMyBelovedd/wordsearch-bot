@@ -21,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .board import read_board
+from .board import find_panel, read_board
 from .device import Device
 from .log import log
 
@@ -38,6 +38,8 @@ class Popup:
     cooldown: float
     level_done: bool  # seeing this means the level is over
     tap: bool
+    tap_point: tuple[int, int] | None = None  # tap here instead of the match center
+    allow: str | None = None  # forbidden zone this entry may tap (see device.py)
     last_hit: float = 0.0
 
 
@@ -59,6 +61,8 @@ def load_popups(folder: Path) -> list[Popup]:
                 cooldown=e.get("cooldown", 1.5),
                 level_done=e.get("level_done", False),
                 tap=e.get("tap", True),
+                tap_point=tuple(e["tap_point"]) if "tap_point" in e else None,
+                allow=e.get("allow"),
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -82,11 +86,16 @@ class PopupWatcher(threading.Thread):
         self.diagnostics = diagnostics
         self.popups = load_popups(templates)
         self.stop_event = threading.Event()
+        self.idle = threading.Event()  # set while the bot sleeps until its next day
         self.level_done = threading.Event()
         self.popup_active = threading.Event()
         self.hits: Counter[str] = Counter()
         self.last_match = 0.0  # monotonic time any popup template last matched
         self.board_visible = False
+        # Set by the main thread while it solves a level. Then "board visible" is just
+        # "the white panel is still exactly there": cheap, and unlike a full grid read
+        # it isn't fooled by letters flying off after a word is found.
+        self.expected_panel: tuple[int, int, int, int] | None = None
         self.frame: np.ndarray | None = None
         self.frame_time = 0.0
         self.fps = 0.0
@@ -115,13 +124,21 @@ class PopupWatcher(threading.Thread):
 
     def run(self) -> None:
         log("WATCHER", "started")
+        failures = 0
         while not self.stop_event.is_set():
+            if self.idle.is_set():
+                self.stop_event.wait(1.0)
+                continue
             t0 = time.monotonic()
             try:
                 self._tick()
+                failures = 0
             except Exception as exc:  # one bad frame must never kill the watcher
-                log("ERROR", f"watcher frame failed: {exc!r}")
-                time.sleep(0.5)
+                failures += 1
+                log("ERROR", f"watcher frame failed ({failures}x): {exc!r}")
+                if failures % 5 == 0:
+                    self.device.reconnect()
+                self.stop_event.wait(min(0.5 * failures, 10.0))
             dt = time.monotonic() - t0
             self.fps = 0.8 * self.fps + 0.2 * (1 / dt if dt > 0 else 0)
         log("WATCHER", "stopped")
@@ -129,8 +146,7 @@ class PopupWatcher(threading.Thread):
     def _tick(self) -> None:
         frame = self.device.frame()
         now = time.monotonic()
-        # A real letter grid, not just a white panel: popups have big white bodies too.
-        self.board_visible = read_board(frame) is not None
+        self.board_visible = self._board_visible(frame)
         with self._frame_cond:
             self.frame, self.frame_time = frame, now
             self._frame_cond.notify_all()
@@ -156,7 +172,8 @@ class PopupWatcher(threading.Thread):
                 self.level_done.set()
             if popup.tap:
                 self.popup_active.set()
-                self.device.tap(*center, why=popup.name)
+                target = popup.tap_point or center
+                self.device.tap(*target, why=popup.name, allow=popup.allow)
             break  # one action per frame; the next frame shows what's under it
 
         if matched or self.board_visible:
@@ -169,6 +186,16 @@ class PopupWatcher(threading.Thread):
         if now - self._last_app_check > APP_CHECK_EVERY_S:
             self._last_app_check = now
             self._ensure_foreground()
+
+    def _board_visible(self, frame: np.ndarray) -> bool:
+        expected = self.expected_panel
+        if expected is None:
+            # A real letter grid, not just a white panel: popups have big white bodies too.
+            return read_board(frame) is not None
+        panel = find_panel(frame)
+        if panel is None:
+            return False
+        return all(abs(a - b) <= 12 for a, b in zip(panel, expected, strict=True))
 
     def _check_unknown(self, frame: np.ndarray, now: float) -> None:
         if self._hidden_since is None:

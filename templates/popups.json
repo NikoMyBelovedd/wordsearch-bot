@@ -13,6 +13,17 @@
     "cooldown": 2.0
   },
   {
+    "name": "tutorial_claim_bonus",
+    "file": "tutorial_claim_bonus.png",
+    "threshold": 0.85,
+    "cooldown": 3.0,
+    "tap_point": [
+      216,
+      205
+    ],
+    "allow": "star_bonus_jar"
+  },
+  {
     "name": "bonus_claim",
     "file": "bonus_claim.png",
     "threshold": 0.85,
