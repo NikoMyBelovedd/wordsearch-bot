@@ -831,6 +831,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pillow" },
     { name = "ruff" },
 ]
 
@@ -844,4 +845,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = ">=0.6" }]
+dev = [
+    { name = "pillow", specifier = ">=12.3.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]

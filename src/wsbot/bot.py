@@ -29,6 +29,7 @@ class Pacing:
     gap_s: float = 0.15  # pause after each swipe
     refire_gap_s: float = 0.7  # slower refires land after word-found animations
     settle_s: float = 0.4  # pause after a popup clears before swiping again
+    clear_tap_s: float = 2.5  # board hidden this long with no known popup -> tap its center
     level_end_s: float = 2.5  # how long to wait for the level to end after a pass
     next_level_timeout_s: float = 20.0
 
@@ -59,6 +60,7 @@ class Bot:
         self.hits: list[Hit] = []
         self.fired: set[str] = set()
         self.status = "idle"
+        self.board_center = (540, 1325)  # middle of the board; updated each level
 
     # ---- board ---------------------------------------------------------------
 
@@ -76,26 +78,48 @@ class Bot:
         return rows
 
     def wait_for_board(self, *, different_from: list[str] | None = None, timeout: float = 20.0):
-        """Block until two consecutive frames show the same readable board."""
+        """Block until two consecutive frames show the same readable board.
+
+        While the board stays hidden and no known popup is being handled, tap the middle
+        of the board every few seconds: the game's tutorial and bonus popups close on
+        any click, so this clears them without a template for each one.
+        """
         deadline = time.monotonic() + timeout
         last_time, prev = 0.0, None
+        hidden_since = last_clear = time.monotonic()
         while not self.stop_event.is_set() and time.monotonic() < deadline:
             frame = self.watcher.latest(newer_than=last_time)
             if frame is None:
                 continue
             last_time = self.watcher.frame_time
+            board = read_board(frame)
+            now = time.monotonic()
+            if board is not None:
+                hidden_since = now
+            elif self._should_clear_tap(now, hidden_since, last_clear):
+                last_clear = now
+                self.device.tap(*self.board_center, why="clear popup (board center)")
             if self.watcher.popup_active.is_set():
                 prev = None
                 continue
-            board = read_board(frame)
             grid = self.read_grid(board) if board else None
             if grid is None or grid == different_from:
                 prev = None
                 continue
             if grid == prev:
+                x, y, w, h = board.panel
+                self.board_center = (x + w // 2, y + h // 2)
                 return board, grid
             prev = grid
         return None, None
+
+    def _should_clear_tap(self, now: float, hidden_since: float, last_clear: float) -> bool:
+        wait = self.pacing.clear_tap_s
+        return (
+            now - hidden_since >= wait
+            and now - last_clear >= wait
+            and now - self.watcher.last_match >= wait
+        )
 
     # ---- burst ---------------------------------------------------------------
 
@@ -169,6 +193,8 @@ class Bot:
                     self._dump("level_stuck")
                     log("ERROR", "level still not done after all passes; waiting for help")
                     self._wait_level_end(grid, timeout=float("inf"))
+                if self.stop_event.is_set():
+                    break
 
                 dt = time.monotonic() - t0
                 self.stats.levels += 1

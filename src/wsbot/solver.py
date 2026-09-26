@@ -34,9 +34,13 @@ class Dictionary:
                 self.prefixes.add(w[:k])
 
     def solve(self, grid: list[str]) -> list[Hit]:
-        """All dictionary words along straight lines, best-ranked first, one path per word."""
+        """Every dictionary word along straight lines, best-ranked first.
+
+        A word that appears on several paths yields a hit per path: a misread letter can
+        create a phantom path, and firing only one could miss the real word.
+        """
         rows, cols = len(grid), len(grid[0])
-        best: dict[str, Hit] = {}
+        hits: list[Hit] = []
         for r in range(rows):
             for c in range(cols):
                 for dr, dc in DIRECTIONS:
@@ -44,9 +48,9 @@ class Dictionary:
                     rr, cc = r, c
                     while 0 <= rr < rows and 0 <= cc < cols:
                         word += grid[rr][cc]
-                        if len(word) >= MIN_LEN and word in self.rank and word not in best:
-                            best[word] = Hit(self.rank[word], word, (r, c), (rr, cc))
+                        if len(word) >= MIN_LEN and word in self.rank:
+                            hits.append(Hit(self.rank[word], word, (r, c), (rr, cc)))
                         if word not in self.prefixes:
                             break
                         rr, cc = rr + dr, cc + dc
-        return sorted(best.values())
+        return sorted(hits)

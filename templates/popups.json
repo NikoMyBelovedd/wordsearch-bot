@@ -7,9 +7,33 @@
     "level_done": true
   },
   {
+    "name": "collect",
+    "file": "collect.png",
+    "threshold": 0.85,
+    "cooldown": 2.0
+  },
+  {
+    "name": "bonus_claim",
+    "file": "bonus_claim.png",
+    "threshold": 0.85,
+    "cooldown": 1.5
+  },
+  {
+    "name": "awesome",
+    "file": "awesome.png",
+    "threshold": 0.85,
+    "cooldown": 2.0
+  },
+  {
     "name": "got_it",
     "file": "got_it.png",
     "threshold": 0.85,
+    "cooldown": 1.5
+  },
+  {
+    "name": "close_x_grey",
+    "file": "close_x_grey.png",
+    "threshold": 0.88,
     "cooldown": 1.5
   }
 ]

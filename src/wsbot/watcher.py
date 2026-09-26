@@ -6,7 +6,7 @@ A daemon thread that owns the screenshot pipeline. Every frame it:
   3. template-matches every registered popup button and taps the ones it finds.
 
 Templates are crops from *inside* buttons only, so no level background ever leaks
-into them. Registry: templates/popups.json.
+into them. Registry: templates/popups.json, where list order is priority order.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .board import find_panel
+from .board import read_board
 from .device import Device
 from .log import log
 
@@ -85,6 +85,7 @@ class PopupWatcher(threading.Thread):
         self.level_done = threading.Event()
         self.popup_active = threading.Event()
         self.hits: Counter[str] = Counter()
+        self.last_match = 0.0  # monotonic time any popup template last matched
         self.board_visible = False
         self.frame: np.ndarray | None = None
         self.frame_time = 0.0
@@ -128,7 +129,8 @@ class PopupWatcher(threading.Thread):
     def _tick(self) -> None:
         frame = self.device.frame()
         now = time.monotonic()
-        self.board_visible = find_panel(frame) is not None
+        # A real letter grid, not just a white panel: popups have big white bodies too.
+        self.board_visible = read_board(frame) is not None
         with self._frame_cond:
             self.frame, self.frame_time = frame, now
             self._frame_cond.notify_all()
@@ -144,6 +146,7 @@ class PopupWatcher(threading.Thread):
             if score < popup.threshold:
                 continue
             matched = True
+            self.last_match = now
             if now - popup.last_hit < popup.cooldown:
                 continue
             popup.last_hit = now
