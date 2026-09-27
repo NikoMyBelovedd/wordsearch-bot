@@ -21,8 +21,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .board import find_panel, read_board
+from .board import covered_below, find_panel, read_board
 from .device import Device
+from .imgio import imread, imwrite
 from .log import log
 
 SCALE = 0.5  # match on a half-res frame: ~4x faster, still plenty of detail for buttons
@@ -42,16 +43,20 @@ class Popup:
     tap_point: tuple[int, int] | None = None  # tap here instead of the match center
     allow: str | None = None  # forbidden zone this entry may tap (see device.py)
     confirm: int = 1  # consecutive matching frames required before acting
+    blocking: bool = True  # False: tapping it doesn't make the bot wait (a toast)
+    holdoff: float = 0.0  # don't tap within this long of tapping any other popup
+    avoid: bool = False  # never tap: while it's visible its area is a no-tap zone (ad buttons)
+    avoid_pad: tuple[int, int] = (40, 40)  # zone = template box grown by this (x, y)
     last_hit: float = 0.0
     streak: int = 0
 
 
 def load_popups(folder: Path) -> list[Popup]:
     registry = folder / "popups.json"
-    entries = json.loads(registry.read_text()) if registry.exists() else []
+    entries = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else []
     popups = []
     for e in entries:
-        img = cv2.imread(str(folder / "popups" / e["file"]))
+        img = imread(folder / "popups" / e["file"])
         if img is None:
             log("WARN", f"popup template missing: {e['file']}")
             continue
@@ -67,6 +72,10 @@ def load_popups(folder: Path) -> list[Popup]:
                 tap_point=tuple(e["tap_point"]) if "tap_point" in e else None,
                 allow=e.get("allow"),
                 confirm=e.get("confirm", 1),
+                blocking=e.get("blocking", True),
+                holdoff=e.get("holdoff", 0.0),
+                avoid=e.get("avoid", False),
+                avoid_pad=tuple(e.get("avoid_pad", (40, 40))),
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -92,7 +101,8 @@ class PopupWatcher(threading.Thread):
         self.stop_event = threading.Event()
         self.idle = threading.Event()  # set while the bot sleeps until its next day
         self.level_done = threading.Event()
-        self.last_action = 0.0  # monotonic time the watcher last tapped a popup
+        self.last_action = 0.0  # monotonic time the watcher last tapped a blocking popup
+        self._last_tap = 0.0  # monotonic time the watcher last tapped any popup
         self.hits: Counter[str] = Counter()
         self.last_match = 0.0  # monotonic time any popup template last matched
         self.board_visible = False
@@ -183,7 +193,16 @@ class PopupWatcher(threading.Thread):
         panel = find_panel(frame)
         if panel is None:
             return False
-        return all(abs(a - b) <= 12 for a, b in zip(panel, expected, strict=True))
+        if all(abs(a - b) <= 12 for a, b in zip(panel, expected, strict=True)):
+            return True
+        # The "already collected" toast cuts the panel short. The bot shouldn't cause it
+        # any more; if it shows anyway, the toast template taps it away and the burst
+        # carries on instead of stopping to wait it out.
+        return (
+            all(abs(a - b) <= 12 for a, b in zip(panel[:3], expected[:3], strict=True))
+            and panel[3] < expected[3]
+            and covered_below(frame, panel)
+        )
 
     def _handle_popups(self, small: np.ndarray, now: float) -> bool:
         """Act on the highest-priority popup that is on screen. True if any matched."""
@@ -193,6 +212,9 @@ class PopupWatcher(threading.Thread):
                 score, center = match(small, popup)
             except Exception as exc:
                 log("ERROR", f"match {popup.name} failed: {exc!r}")
+                continue
+            if popup.avoid:
+                self._guard(popup, center if score >= popup.threshold else None)
                 continue
             if score >= popup.threshold:
                 popup.streak += 1
@@ -208,16 +230,38 @@ class PopupWatcher(threading.Thread):
         # lower-priority button (like a close X) never jumps ahead of it.
         if popup.streak < popup.confirm or now - popup.last_hit < popup.cooldown:
             return True
+        # Closing the bonus popup while its claimed coins still fly leaves the game
+        # ignoring every touch until a restart. It closes itself once they land.
+        if now - self._last_tap < popup.holdoff:
+            return True
         popup.last_hit = now
         self.hits[popup.name] += 1
         log("WATCHER", f"{popup.name} score={score:.2f} at {center}")
         if popup.level_done:
             self.level_done.set()
         if popup.tap:
-            self.last_action = now
+            if popup.blocking:
+                self.last_action = now
+            self._last_tap = now
             target = popup.tap_point or center
             self.device.tap(*target, why=popup.name, allow=popup.allow)
         return True
+
+    def _guard(self, popup: Popup, center: tuple[int, int] | None) -> None:
+        """Keep a no-tap zone over an avoid-template (an ad button) while it's visible."""
+        zone = None
+        if center is not None:
+            th, tw = popup.template.shape[:2]
+            hw = tw / SCALE / 2 + popup.avoid_pad[0]
+            hh = th / SCALE / 2 + popup.avoid_pad[1]
+            cx, cy = center
+            zone = (round(cx - hw), round(cy - hh), round(cx + hw), round(cy + hh))
+            if popup.streak == 0:
+                log("WATCHER", f"{popup.name} on screen: no taps in {zone}")
+            popup.streak += 1
+        else:
+            popup.streak = 0
+        self.device.set_dynamic_zone(popup.name, zone)
 
     def _check_unknown(self, frame: np.ndarray, now: float) -> None:
         if self._hidden_since is None:
@@ -227,7 +271,7 @@ class PopupWatcher(threading.Thread):
         if hidden > UNKNOWN_AFTER_S and now - self._last_unknown_dump > 30:
             self._last_unknown_dump = now
             path = self.diagnostics / f"unknown_popup_{time.strftime('%Y%m%d_%H%M%S')}.png"
-            cv2.imwrite(str(path), frame)
+            imwrite(path, frame)
             log("WARN", f"board hidden {hidden:.0f}s with no known popup -> saved {path.name}")
 
     def _ensure_foreground(self) -> None:

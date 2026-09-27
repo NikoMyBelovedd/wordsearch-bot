@@ -11,6 +11,10 @@ import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .schedule import Schedule
 
 PLAY_TOTAL = 14_000
 PLAY_DAYS = 10
@@ -29,6 +33,15 @@ def seconds_until_midnight() -> float:
     return (midnight - now).total_seconds()
 
 
+def local_file(root: Path, serial: str, name: str) -> Path:
+    """Per-platform state file: an iPhone plays its own game account, so its level
+    count and swiped words must never mix with the Android ones."""
+    stem, dot, ext = name.partition(".")
+    if serial == "ios" or serial.startswith("ios:"):
+        stem += "-" + serial.replace(":", "-")
+    return root / "local" / f"{stem}{dot}{ext}"
+
+
 class Progress:
     """Thread-safe, crash-safe level counters persisted as JSON."""
 
@@ -38,7 +51,7 @@ class Progress:
         self.data: dict = {"days": {}, "plans": {}, "all_time": 0}
         if path.exists():
             try:
-                self.data.update(json.loads(path.read_text()))
+                self.data.update(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, ValueError):
                 pass  # a corrupt file must never stop the bot; start counting afresh
 
@@ -47,6 +60,14 @@ class Progress:
 
     def plan(self, plan_id: str) -> int:
         return self.data["plans"].get(plan_id, 0)
+
+    def meta(self, key: str):
+        return self.data.get("meta", {}).get(key)
+
+    def set_meta(self, key: str, value) -> None:
+        with self.lock:
+            self.data.setdefault("meta", {})[key] = value
+            self._save()
 
     def record(self, plan_id: str) -> None:
         with self.lock:
@@ -59,7 +80,7 @@ class Progress:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=1))
+        tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
         tmp.replace(self.path)  # atomic: a crash mid-write never corrupts progress
 
 
@@ -72,22 +93,28 @@ class Goal:
     per_day: int | None
     total: int | None
     progress: Progress
+    schedule: Schedule | None = None  # None = no pacing (single level)
     session_levels: int = 0
+    session_target: int | None = None  # stop after this many levels this run (--levels)
 
     @classmethod
     def play(cls, progress: Progress) -> Goal:
+        from .schedule import PLAY_SCHEDULE
+
         return cls(
             "play14k",
             f"Play · {PLAY_TOTAL:,} levels in {PLAY_DAYS} days",
             PLAY_PER_DAY,
             PLAY_TOTAL,
             progress,
+            PLAY_SCHEDULE,
         )
 
     @classmethod
-    def custom(cls, progress: Progress, per_day: int) -> Goal:
-        per_day = max(CUSTOM_MIN, min(CUSTOM_MAX, per_day))
-        return cls("custom", f"Custom · {per_day:,} levels/day", per_day, None, progress)
+    def custom(cls, progress: Progress, schedule: Schedule) -> Goal:
+        schedule.per_day = max(CUSTOM_MIN, min(CUSTOM_MAX, schedule.per_day))
+        title = f"Custom · {schedule.per_day:,} levels/day"
+        return cls("custom", title, schedule.per_day, None, progress, schedule)
 
     @classmethod
     def single(cls, progress: Progress) -> Goal:
@@ -106,6 +133,8 @@ class Goal:
     def finished(self) -> bool:
         if self.plan_id == "single":
             return self.session_levels >= 1
+        if self.session_target is not None and self.session_levels >= self.session_target:
+            return True
         return self.total is not None and self.done_total >= self.total
 
     def quota_reached_today(self) -> bool:

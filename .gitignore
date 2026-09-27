@@ -5,3 +5,5 @@ __pycache__/
 diagnostics/
 *.log
 local/
+.pytest_cache/
+HANDOFF.md

@@ -8,18 +8,20 @@ from pathlib import Path
 import cv2
 
 from .board import read_board
-from .device import FORBIDDEN_ZONES, Device
+from .device import open_device
+from .imgio import imwrite
 from .letters import LetterReader
 from .solver import Dictionary
 from .watcher import SCALE, load_popups, match
 
 
 def run(serial: str, root: Path, *, overlay: bool) -> None:
-    frame = Device(serial).frame()
+    device = open_device(serial)
+    frame = device.frame()
     small = cv2.resize(frame, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
 
     print("\nPOPUP TEMPLATES")
-    popups = load_popups(root / "templates")
+    popups = load_popups(root / device.templates)
     matches = []
     for p in popups:
         score, center = match(small, p)
@@ -54,7 +56,7 @@ def run(serial: str, root: Path, *, overlay: bool) -> None:
     if not overlay:
         return
     out = frame.copy()
-    for name, (x1, y1, x2, y2) in FORBIDDEN_ZONES.items():
+    for name, (x1, y1, x2, y2) in device.zones.items():
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), 4)
         cv2.putText(out, name, (x1, y2 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
     if board:
@@ -77,6 +79,7 @@ def run(serial: str, root: Path, *, overlay: bool) -> None:
                 (255, 0, 255),
                 3,
             )
+    (root / "diagnostics").mkdir(exist_ok=True)
     path = root / "diagnostics" / f"calibrate_{time.strftime('%Y%m%d_%H%M%S')}.png"
-    cv2.imwrite(str(path), out)
+    imwrite(path, out)
     print(f"\noverlay saved: {path}")

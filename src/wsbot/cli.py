@@ -10,17 +10,24 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SERIAL = "emulator-5554"
+DEFAULT_SERIAL = "ios"  # the iPhone over USB; --serial picks an adb device
 
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="wsbot", description="Word Search Explorer auto-solver")
-    p.add_argument("--serial", help="ADB serial (default: $WSBOT_SERIAL or emulator-5554)")
+    p.add_argument(
+        "--serial",
+        help="ADB serial, or ios / ios:UDID for an iPhone over USB (default: $WSBOT_SERIAL or ios)",
+    )
     p.add_argument("--headless", action="store_true", help="run without the TUI")
     p.add_argument(
         "--mode", choices=["play", "custom", "single"], default="play", help="--headless goal"
     )
-    p.add_argument("--per-day", type=int, default=1000, help="--mode custom: levels per day")
+    p.add_argument(
+        "--per-day", type=int, help="--mode custom: levels per day (default: saved setting)"
+    )
+    p.add_argument("--fast", action="store_true", help="no idling or breaks (testing)")
+    p.add_argument("--levels", type=int, help="stop after this many levels")
     p.add_argument("--dry-run", action="store_true", help="decide everything, touch nothing")
     p.add_argument("--diagnose", action="store_true", help="score every template on this frame")
     p.add_argument("--calibrate", action="store_true", help="save an annotated overlay")
@@ -37,57 +44,72 @@ def main() -> None:
 
         return diag(serial, ROOT, overlay=args.calibrate)
     if args.headless:
-        return headless(serial, args.mode, args.per_day, args.dry_run)
+        return headless(serial, args.mode, args.per_day, args.dry_run, args.fast, args.levels)
 
     from .tui import run_tui
 
     run_tui(serial, ROOT, dry_run=args.dry_run)
 
 
-def make_goal(mode: str, per_day: int):
-    from .goal import Goal, Progress
+def make_goal(mode: str, per_day: int | None, serial: str, fast: bool = False):
+    from dataclasses import replace
 
-    progress = Progress(ROOT / "local" / "progress.json")
-    if mode == "custom":
-        return Goal.custom(progress, per_day)
+    from .goal import Goal, Progress, local_file
+    from .schedule import load_custom
+
+    progress = Progress(local_file(ROOT, serial, "progress.json"))
     if mode == "single":
         return Goal.single(progress)
-    return Goal.play(progress)
+    if mode == "custom":
+        schedule = load_custom(ROOT / "local" / "settings.json")
+        if per_day:
+            schedule.per_day = per_day
+        goal = Goal.custom(progress, schedule)
+    else:
+        goal = Goal.play(progress)
+    if fast and goal.schedule:
+        goal.schedule = replace(goal.schedule, hours_min=0, hours_max=0, break_every_max=0)
+    return goal
 
 
-def headless(serial: str, mode: str, per_day: int, dry_run: bool) -> None:
+def headless(
+    serial: str, mode: str, per_day: int | None, dry_run: bool, fast: bool, levels: int | None
+) -> None:
     from .bot import Bot
     from .log import file_sink, set_sinks, stdout_sink
 
     (ROOT / "local").mkdir(exist_ok=True)
     set_sinks(stdout_sink, file_sink(ROOT / "local" / "wsbot.log"))
-    bot = Bot(serial, ROOT, make_goal(mode, per_day), dry_run=dry_run)
+    goal = make_goal(mode, per_day, serial, fast)
+    goal.session_target = levels
+    bot = Bot(serial, ROOT, goal, dry_run=dry_run)
     signal.signal(signal.SIGINT, lambda *_: bot.stop_event.set())
     bot.run()
 
 
 def capture(serial: str, name: str, crop: str | None, level_done: bool) -> None:
-    import cv2
+    from .device import open_device
+    from .imgio import imwrite
 
-    from .device import Device
-
-    frame = Device(serial).frame()
+    device = open_device(serial)
+    frame = device.frame()
     if not crop:
+        (ROOT / "diagnostics").mkdir(exist_ok=True)
         out = ROOT / "diagnostics" / f"capture_{name}.png"
-        cv2.imwrite(str(out), frame)
+        imwrite(out, frame)
         print(f"saved full frame to {out}; pick a box INSIDE the button and rerun with --crop")
         return
     x, y, w, h = (int(v) for v in crop.split(","))
-    folder = ROOT / "templates"
-    cv2.imwrite(str(folder / "popups" / f"{name}.png"), frame[y : y + h, x : x + w])
+    folder = ROOT / device.templates
+    imwrite(folder / "popups" / f"{name}.png", frame[y : y + h, x : x + w])
     registry = folder / "popups.json"
-    entries = json.loads(registry.read_text()) if registry.exists() else []
+    entries = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else []
     entries = [e for e in entries if e["name"] != name]
     entry = {"name": name, "file": f"{name}.png", "threshold": 0.85, "cooldown": 1.5}
     if level_done:
         entry["level_done"] = True
     entries.append(entry)
-    registry.write_text(json.dumps(entries, indent=2) + "\n")
+    registry.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
     print(f"registered popup '{name}' ({w}x{h})")
 
 

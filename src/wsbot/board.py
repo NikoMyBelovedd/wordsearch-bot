@@ -65,6 +65,37 @@ def _cluster(values: list[float], gap: float) -> list[float]:
     return [sum(g) / len(g) for g in groups]
 
 
+def _fills(centers: list[float], extent: int) -> bool:
+    """True if evenly spaced rows (or cols) span the panel with matching margins.
+
+    A toast ("You have already collected this word!") or a tutorial box over part of
+    the board hides whole rows; what's left still looks like a clean smaller grid, and
+    reading it as a new board fakes a level change. Hidden rows show up as a lopsided
+    margin (edge rows hidden) or an irregular gap (middle rows hidden).
+    """
+    gaps = np.diff(centers)
+    pitch = float(np.median(gaps))
+    if np.any(np.abs(gaps - pitch) > 0.35 * pitch):
+        return False
+    before, after = centers[0], extent - centers[-1]
+    return abs(before - after) <= 0.5 * pitch
+
+
+def covered_below(img: np.ndarray, panel: tuple[int, int, int, int]) -> bool:
+    """True if a flat light box (a toast) sits right under the panel's bottom edge.
+
+    The toast is light grey, not board white, so it cuts the panel short and the rows
+    above it pass as a whole board. Under a real board there's landscape, never a flat
+    light strip.
+    """
+    px, py, pw, ph = panel
+    y = py + ph + 6
+    if y >= img.shape[0]:
+        return False
+    strip = img[y, px + pw // 5 : px + pw - pw // 5].min(axis=1).astype(np.float32)
+    return float(strip.mean()) >= 200 and float(strip.std()) < 8
+
+
 def read_board(img: np.ndarray) -> Board | None:
     """Locate the board and its letter cells. Returns None if no clean grid is visible."""
     panel = find_panel(img)
@@ -91,6 +122,8 @@ def read_board(img: np.ndarray) -> Board | None:
     row_ys = _cluster([y + med_h / 2 for _, y, _, _ in blobs], gap=med_h * 0.8)
     rows, cols = len(row_ys), len(col_xs)
     if rows < 3 or cols < 3 or len(blobs) != rows * cols:
+        return None
+    if not (_fills(row_ys, ph) and _fills(col_xs, pw)) or covered_below(img, panel):
         return None
 
     grid: dict[tuple[int, int], tuple[int, int, int, int]] = {}

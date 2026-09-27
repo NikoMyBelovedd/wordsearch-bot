@@ -13,6 +13,12 @@ from collections.abc import Callable
 
 Sink = Callable[[str, str, str], None]  # (timestamp, tag, message)
 
+# Log categories: [LOG] (general info), [POPUP-WATCHER], [WARNING], [ERROR], plus the busy
+# action tags (LEVEL, SWIPE, TAP, PACE, SAFETY, RECOVERY). Minor tags fold into [LOG]
+# with their old name as a prefix, so nothing is lost.
+ALIASES = {"WATCHER": "POPUP-WATCHER", "WARN": "WARNING"}
+GENERAL = {"DEVICE", "LETTERS", "APP", "WAIT", "PAUSE", "DIAG", "OCR", "GOAL", "PASS", "PROBE"}
+
 _sinks: list[Sink] = []
 _lock = threading.Lock()
 
@@ -44,6 +50,9 @@ def set_sinks(*sinks: Sink) -> None:
 
 
 def log(tag: str, msg: str) -> None:
+    if tag in GENERAL:
+        tag, msg = "LOG", f"{tag.lower()}: {msg}"
+    tag = ALIASES.get(tag, tag)
     ts = time.strftime("%H:%M:%S")
     with _lock:
         sinks = list(_sinks)

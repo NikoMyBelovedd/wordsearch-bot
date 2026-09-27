@@ -1,0 +1,136 @@
+[
+  {
+    "name": "get_reward",
+    "file": "get_reward.png",
+    "threshold": 0.85,
+    "avoid": true,
+    "avoid_pad": [
+      110,
+      40
+    ]
+  },
+  {
+    "name": "store_sheet_close",
+    "file": "store_sheet_close.png",
+    "threshold": 0.9,
+    "cooldown": 2.0,
+    "allow": "back_button"
+  },
+  {
+    "name": "next_level",
+    "file": "next_level.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "level_done": true,
+    "allow": "below_board"
+  },
+  {
+    "name": "next_level_text",
+    "file": "next_level_text.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "level_done": true,
+    "allow": "below_board"
+  },
+  {
+    "name": "collect",
+    "file": "collect.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board"
+  },
+  {
+    "name": "set_continue",
+    "file": "set_continue.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board"
+  },
+  {
+    "name": "back_to_level",
+    "file": "back_to_level.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board"
+  },
+  {
+    "name": "tutorial_claim_bonus",
+    "file": "tutorial_claim_bonus.png",
+    "threshold": 0.85,
+    "cooldown": 3.0,
+    "tap_point": [
+      225,
+      135
+    ],
+    "allow": "star_bonus_jar"
+  },
+  {
+    "name": "tutorial_daily_challenge",
+    "file": "tutorial_daily_challenge.png",
+    "threshold": 0.85,
+    "cooldown": 3.0,
+    "tap_point": [
+      172,
+      1915
+    ],
+    "allow": "below_board"
+  },
+  {
+    "name": "tutorial_tournament",
+    "file": "tutorial_tournament.png",
+    "threshold": 0.85,
+    "cooldown": 3.0,
+    "tap_point": [
+      109,
+      530
+    ]
+  },
+  {
+    "name": "bonus_claim",
+    "file": "bonus_claim.png",
+    "threshold": 0.85,
+    "cooldown": 1.5
+  },
+  {
+    "name": "awesome",
+    "file": "awesome.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board"
+  },
+  {
+    "name": "lets_go",
+    "file": "lets_go.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board"
+  },
+  {
+    "name": "got_it",
+    "file": "got_it.png",
+    "threshold": 0.85,
+    "cooldown": 1.5,
+    "allow": "below_board"
+  },
+  {
+    "name": "already_collected",
+    "file": "already_collected.png",
+    "threshold": 0.85,
+    "cooldown": 1.0,
+    "blocking": false
+  },
+  {
+    "name": "play_later",
+    "file": "play_later.png",
+    "threshold": 0.85,
+    "cooldown": 2.0
+  },
+  {
+    "name": "close_x_grey",
+    "file": "close_x_grey.png",
+    "threshold": 0.88,
+    "cooldown": 1.5,
+    "confirm": 8,
+    "holdoff": 4.0
+  }
+]

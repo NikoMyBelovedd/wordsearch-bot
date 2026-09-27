@@ -25,7 +25,7 @@ class Dictionary:
     def __init__(self, path: Path) -> None:
         self.rank: dict[str, int] = {}
         self.prefixes: set[str] = set()
-        for i, line in enumerate(path.read_text().split()):
+        for i, line in enumerate(path.read_text(encoding="utf-8").split()):
             w = line.strip().upper()
             if len(w) < MIN_LEN or not w.isalpha() or w in self.rank:
                 continue

@@ -43,21 +43,20 @@ class SafetyError(RuntimeError):
 class ShellInput:
     """A long-lived `adb shell` that runs input commands and waits for each to finish."""
 
-    SENTINEL = "__wsbot_ok__"
+    SENTINEL = b"__wsbot_ok__"
 
     def __init__(self, serial: str) -> None:
         self.serial = serial
-        self.proc: subprocess.Popen[str] | None = None
+        self.proc: subprocess.Popen[bytes] | None = None
 
-    def _open(self) -> subprocess.Popen[str]:
+    def _open(self) -> subprocess.Popen[bytes]:
         if self.proc is None or self.proc.poll() is not None:
             self.proc = subprocess.Popen(
                 ["adb", "-s", self.serial, "shell"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
+                bufsize=0,  # bytes, not text: Windows text pipes would turn \n into \r\n
             )
         return self.proc
 
@@ -66,7 +65,7 @@ class ShellInput:
             proc = self._open()
             try:
                 assert proc.stdin and proc.stdout
-                proc.stdin.write(f"{cmd}; echo {self.SENTINEL}\n")
+                proc.stdin.write(f"{cmd}; echo {self.SENTINEL.decode()}\n".encode())
                 proc.stdin.flush()
                 while True:
                     line = proc.stdout.readline()
@@ -85,7 +84,54 @@ class ShellInput:
             self.proc.terminate()
 
 
-class Device:
+class BaseDevice:
+    """What the bot needs from a platform backend. Coordinates are in the backend's
+    calibration space (`calib`); each backend scales them to its screen."""
+
+    platform = "android"
+    calib: tuple[int, int] = (CALIB_W, CALIB_H)
+    zones: dict[str, tuple[int, int, int, int]] = FORBIDDEN_ZONES
+    board_center = (540, 1325)  # first clear-tap target before any board was read
+    above_board = (540, 620)  # neutral clear-tap target over the hint card
+    templates = "templates"  # popups.json + popups/, relative to the repo root
+    swipe_ms = 60  # fast-pass finger travel time
+    dry_run = False
+    below_board_y: int | None = None
+    refused = 0
+
+    def set_dynamic_zone(self, name: str, rect: tuple[int, int, int, int] | None) -> None:
+        """A no-tap zone that exists only while something (an ad button) is on screen."""
+        dyn = self.__dict__.setdefault("dynamic_zones", {})
+        if rect is None:
+            dyn.pop(name, None)
+        else:
+            dyn[name] = rect
+
+    def _check_safe(self, x: int, y: int, what: str, allow: str | None = None) -> None:
+        zones = dict(self.zones)
+        zones.update(self.__dict__.get("dynamic_zones", {}))
+        if self.below_board_y is not None:
+            zones["below_board"] = (0, self.below_board_y, *self.calib)
+        for name, (x1, y1, x2, y2) in zones.items():
+            if name != allow and x1 <= x <= x2 and y1 <= y <= y2:
+                self.refused += 1
+                log("SAFETY", f"refused {what} at ({x},{y}) inside {name}")
+                raise SafetyError(name)
+
+    def close(self) -> None:
+        pass
+
+
+def open_device(serial: str, *, dry_run: bool = False) -> BaseDevice:
+    """`ios` / `ios:UDID` = an iPhone over USB (pymobiledevice3); anything else = an adb serial."""
+    if serial == "ios" or serial.startswith("ios:"):
+        from .ios_device import IOSGameDevice
+
+        return IOSGameDevice(serial.partition(":")[2] or None, dry_run=dry_run)
+    return Device(serial, dry_run=dry_run)
+
+
+class Device(BaseDevice):
     def __init__(self, serial: str, *, dry_run: bool = False) -> None:
         self.serial = serial
         self.dry_run = dry_run
@@ -184,17 +230,10 @@ class Device:
     def app_stop(self, package: str) -> None:
         self.adb("shell", "am", "force-stop", package)
 
-    # ---- input --------------------------------------------------------------
+    def close(self) -> None:
+        self.shell.close()
 
-    def _check_safe(self, x: int, y: int, what: str, allow: str | None = None) -> None:
-        zones = dict(FORBIDDEN_ZONES)
-        if self.below_board_y is not None:
-            zones["below_board"] = (0, self.below_board_y, CALIB_W, CALIB_H)
-        for name, (x1, y1, x2, y2) in zones.items():
-            if name != allow and x1 <= x <= x2 and y1 <= y <= y2:
-                self.refused += 1
-                log("SAFETY", f"refused {what} at ({x},{y}) inside {name}")
-                raise SafetyError(name)
+    # ---- input --------------------------------------------------------------
 
     def _scale(self, x: float, y: float) -> tuple[int, int]:
         px = min(max(round(x * self.sx), 0), self.width - 1)
@@ -232,3 +271,28 @@ class Device:
         self.swipes += 1
         log("SWIPE", why)
         return True
+
+    def hold(self, start: tuple[int, int], end: tuple[int, int]) -> bool:
+        """Put a finger down at start and drag to end without lifting. Pair with release()."""
+        try:
+            self._check_safe(*start, "hold start")
+            self._check_safe(*end, "hold end")
+        except SafetyError:
+            return False
+        if self.dry_run:
+            return True
+        sx, sy = self._scale(*start)
+        ex, ey = self._scale(*end)
+        mx, my = (sx + ex) // 2, (sy + ey) // 2
+        with self.input_lock:
+            self.shell.run(
+                f"input motionevent DOWN {sx} {sy}; input motionevent MOVE {mx} {my}; "
+                f"input motionevent MOVE {ex} {ey}"
+            )
+        return True
+
+    def release(self, end: tuple[int, int]) -> None:
+        if self.dry_run:
+            return
+        with self.input_lock:
+            self.shell.run("input motionevent UP {} {}".format(*self._scale(*end)))

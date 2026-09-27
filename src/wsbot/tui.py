@@ -7,6 +7,7 @@ bot threads never touch widgets directly.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import threading
 import time
@@ -27,17 +28,17 @@ from textual.widgets import Footer, RichLog, Static
 
 from .banner import ORANGE, WHITE, banner, compact_banner
 from .goal import (
-    CUSTOM_DEFAULT,
     CUSTOM_MAX,
     CUSTOM_MIN,
     CUSTOM_STEP,
     PLAY_DAYS,
-    PLAY_PER_DAY,
     PLAY_TOTAL,
     Goal,
     Progress,
+    local_file,
 )
 from .log import file_sink, set_sinks, stdout_sink
+from .schedule import PLAY_SCHEDULE, Schedule, load_custom, save_custom
 
 DIM = "#8a8a93"
 POINTER = " \u203a "  # the row cursor
@@ -45,17 +46,16 @@ TIMES = "\u00d7"
 MINUS = "\u2212"
 CURSOR_BG = "#3b2210"
 TAG_STYLES = {
+    "LOG": WHITE,
     "LEVEL": f"bold {ORANGE}",
-    "GOAL": f"bold {ORANGE}",
-    "PASS": "#fdba74",
-    "WATCHER": "#67e8f9",
+    "POPUP-WATCHER": "#67e8f9",
     "TAP": DIM,
     "SWIPE": "#5c5c66",
-    "WARN": "bold #facc15",
+    "WARNING": "bold #facc15",
     "ERROR": "bold #f87171",
     "SAFETY": "bold #f87171",
     "RECOVERY": "bold #f87171",
-    "OCR": "#a5b4fc",
+    "PACE": "#fdba74",
 }
 
 THEME = Theme(
@@ -102,7 +102,83 @@ def list_adb_devices() -> list[AdbDevice]:
             continue
         props = dict(p.split(":", 1) for p in parts[2:] if ":" in p)
         model = props.get("model", props.get("product", "")).replace("_", " ")
-        devices.append(AdbDevice(parts[0], parts[1], model))
+        devices.append(AdbDevice(parts[0], parts[1], f"Android · {model}".rstrip(" ·")))
+    return devices
+
+
+IPHONE_NAMES = {"iPhone14,6": "iPhone SE 3", "iPhone12,8": "iPhone SE 2", "iPhone14,7": "iPhone 14"}
+
+
+def _usb_iphones() -> dict[str, str]:
+    """UDID -> "model · iOS x.y" for iPhones usbmux sees (usbmuxd on Linux/macOS, the Apple
+    Mobile Device Service on Windows). Empty when there is no usbmux or pymobiledevice3."""
+    import asyncio
+
+    async def scan() -> dict[str, str]:
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.usbmux import list_devices as mux_devices
+
+        found: dict[str, str] = {}
+        for dev in await mux_devices():
+            if not dev.is_usb:
+                continue
+            label = "iPhone"
+            with contextlib.suppress(Exception):
+                lockdown = await create_using_usbmux(dev.serial, autopair=False)
+                try:
+                    kind = lockdown.all_values.get("ProductType", "")
+                    name = IPHONE_NAMES.get(kind, kind or "iPhone")
+                    label = f"{name} · iOS {lockdown.product_version}"
+                finally:
+                    await lockdown.close()
+            found[dev.serial] = label
+        return found
+
+    # Own thread: the TUI calls this from inside Textual's running event loop.
+    result: dict[str, str] = {}
+
+    def worker() -> None:
+        with contextlib.suppress(Exception):
+            result.update(asyncio.run(asyncio.wait_for(scan(), 8)))
+
+    t = threading.Thread(target=worker, name="usb-scan", daemon=True)
+    t.start()
+    t.join(10)
+    return result
+
+
+def list_ios_devices() -> list[AdbDevice]:
+    """iPhones on USB. Ready when the pymobiledevice3 tunnel service (`pymobiledevice3 remote
+    tunneld`) serves a tunnel for it, which the USB screen stream and touch need."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:49151/", timeout=3) as r:
+            tunnels = set(json.loads(r.read() or b"{}"))
+    except (OSError, ValueError):
+        tunnels = set()
+    labels = _usb_iphones()
+    on_usb = set(labels) | tunnels
+    devices = []
+    for udid in sorted(on_usb):
+        label = labels.get(udid, "iPhone")
+        serial = "ios" if len(on_usb) == 1 else f"ios:{udid}"
+        if udid in tunnels:
+            devices.append(AdbDevice(serial, "device", f"{label} · USB"))
+        else:
+            devices.append(AdbDevice(serial, "no tunnel", f"{label} · start tunneld"))
+    return devices
+
+
+def list_devices() -> list[AdbDevice]:
+    """iPhones (USB) + adb devices. adb trouble only counts if nothing else is found."""
+    devices = list_ios_devices()
+    try:
+        devices += list_adb_devices()
+    except RuntimeError:
+        if not devices:
+            raise
     return devices
 
 
@@ -130,11 +206,15 @@ def fmt_duration(seconds: float) -> str:
     return f"{m}m {s:02d}s" if m else f"{s}s"
 
 
+def _hm(epoch: float) -> str:
+    return time.strftime("%H:%M", time.localtime(epoch))
+
+
 def log_line(ts: str, tag: str, msg: str) -> Text:
     line = Text()
     line.append(f"{ts} ", style="#5c5c66")
-    line.append(f"{tag:<8} ", style=TAG_STYLES.get(tag, DIM))
-    line.append(msg, style="#e5e5e5" if tag in ("LEVEL", "GOAL") else "#b4b4bd")
+    line.append(f"{'[' + tag + ']':<16}", style=TAG_STYLES.get(tag, DIM))
+    line.append(msg, style="#e5e5e5" if tag in ("LEVEL", "LOG") else "#b4b4bd")
     return line
 
 
@@ -207,7 +287,9 @@ class DeviceScreen(Screen):
         elif not self.devices:
             body.append("  No devices found.\n\n", style="bold #facc15")
             body.append(
-                "  Start an emulator or plug in a phone with USB debugging on,\n", style=DIM
+                "  Plug in your iPhone (iOS 27+, tunnel service running) or an emulator /\n"
+                "  USB-debug Android phone,\n",
+                style=DIM,
             )
             body.append("  then press ", style=DIM)
             body.append("r", style=f"bold {ORANGE}")
@@ -243,17 +325,30 @@ class DeviceScreen(Screen):
 
 # ---- screen 2: goal picker -----------------------------------------------------------
 
-MODES = ("play", "custom", "single")
+MODES = ("play", "single", "custom")
+
+
+def _schedule_text(s: Schedule) -> Text:
+    t = Text()
+    t.append(f"{s.per_day:,}", style=f"bold {ORANGE}")
+    t.append("/day · ", style="#d4d4d8")
+    if s.paced:
+        t.append(f"{s.hours_min:g}-{s.hours_max:g} h", style=f"bold {WHITE}")
+        t.append(" spread · ", style="#d4d4d8")
+    else:
+        t.append("flat out · ", style=f"bold {WHITE}")
+    if s.breaks:
+        t.append(f"{s.break_len_min}-{s.break_len_max} min", style=f"bold {WHITE}")
+        t.append(" breaks", style="#d4d4d8")
+    else:
+        t.append("no breaks", style="#d4d4d8")
+    return t
 
 
 class ModeScreen(Screen):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move(-1)", "Up", show=False),
         Binding("down", "move(1)", "Down", show=False),
-        Binding("left", "adjust(-1)", MINUS, show=False),
-        Binding("right", "adjust(1)", "+", show=False),
-        Binding("shift+left", "adjust(-10)", f"{MINUS}10", show=False),
-        Binding("shift+right", "adjust(10)", "+10", show=False),
         Binding("enter", "choose", "Select / Play"),
         Binding("escape", "back", "Devices"),
         Binding("q", "app.quit", "Quit"),
@@ -263,7 +358,6 @@ class ModeScreen(Screen):
         super().__init__()
         self.cursor = 0  # rows 0..2 are modes, 3 is the PLAY button
         self.mode = "play"
-        self.per_day = CUSTOM_DEFAULT
 
     def compose(self) -> ComposeResult:
         with Center():
@@ -281,7 +375,7 @@ class ModeScreen(Screen):
         self.render_all()
 
     def on_screen_resume(self) -> None:
-        self.render_all()  # progress changed while the run screen was up
+        self.render_all()  # progress / custom settings changed on another screen
 
     def on_resize(self) -> None:
         self.query_one("#banner", Static).update(banner(self.size.width, self.size.height - 22))
@@ -290,14 +384,11 @@ class ModeScreen(Screen):
         self.cursor = max(0, min(3, self.cursor + step))
         self.render_all()
 
-    def action_adjust(self, steps: int) -> None:
-        if self.cursor != 1:
-            return
-        self.mode = "custom"
-        self.per_day = max(CUSTOM_MIN, min(CUSTOM_MAX, self.per_day + steps * CUSTOM_STEP))
-        self.render_all()
-
     def action_choose(self) -> None:
+        if self.cursor == 2:
+            self.mode = "custom"
+            self.app.push_screen(CustomScreen())
+            return
         if self.cursor < 3:
             self.mode = MODES[self.cursor]
             self.cursor = 3
@@ -306,7 +397,7 @@ class ModeScreen(Screen):
         progress = self.app.progress()
         goal = {
             "play": lambda: Goal.play(progress),
-            "custom": lambda: Goal.custom(progress, self.per_day),
+            "custom": lambda: Goal.custom(progress, self.app.custom_schedule()),
             "single": lambda: Goal.single(progress),
         }[self.mode]()
         self.app.push_screen(RunScreen(goal))
@@ -325,10 +416,12 @@ class ModeScreen(Screen):
         line.append(f"{progress.plan('play14k'):,} / {PLAY_TOTAL:,}", style=f"bold {ORANGE}")
         self.query_one("#progress-line", Static).update(line)
 
+        custom = _schedule_text(self.app.custom_schedule())
+        custom.append("   enter to edit", style=DIM)
         rows = [
-            ("PLAY", self._play_detail()),
-            ("CUSTOM TARGET", self._custom_detail()),
+            ("PLAY", _schedule_text(PLAY_SCHEDULE)),
             ("SINGLE LEVEL", Text("play one level, then stop", style=DIM)),
+            ("CUSTOM", custom),
         ]
         body = Text()
         for i, (name, detail) in enumerate(rows):
@@ -337,12 +430,18 @@ class ModeScreen(Screen):
             chosen = MODES[i] == self.mode
             body.append(POINTER if here else "   ", style=f"bold {ORANGE}{bg}")
             body.append("● " if chosen else "○ ", style=f"bold {ORANGE if chosen else DIM}{bg}")
-            body.append(f"{name:<16}", style=f"bold {WHITE}{bg}")
+            body.append(f"{name:<14}", style=f"bold {WHITE}{bg}")
             detail.stylize(bg.strip())
             body.append_text(detail)
-            body.append(" " * max(0, 54 - len(detail.plain)), style=bg.strip())
+            body.append(" " * max(0, 60 - len(detail.plain)), style=bg.strip())
             if i < len(rows) - 1:
                 body.append("\n\n")
+        if self.mode == "play":
+            body.append(
+                f"\n\n   {PLAY_TOTAL:,} levels over {PLAY_DAYS} days · starts ~9:00 each "
+                "day · idles between levels to stay on pace",
+                style=DIM,
+            )
         self.query_one("#modes", Static).update(body)
 
         on_play = self.cursor == 3
@@ -352,38 +451,194 @@ class ModeScreen(Screen):
         button.append(label, style=style)
         self.query_one("#play", Static).update(button)
 
-        hint = Text(f"↑/↓ move   ←/→ adjust target (shift {TIMES}10)   ", style=DIM)
+        hint = Text("↑/↓ move   ", style=DIM)
         hint.append("enter", style=f"bold {ORANGE}")
         hint.append(" select · play   ", style=DIM)
         hint.append("esc", style=f"bold {ORANGE}")
         hint.append(" devices", style=DIM)
         self.query_one("#hint", Static).update(hint)
 
-    def _play_detail(self) -> Text:
-        t = Text()
-        t.append(f"{PLAY_TOTAL:,}", style=f"bold {ORANGE}")
-        t.append(f" levels in {PLAY_DAYS} days · ", style="#d4d4d8")
-        t.append(f"{PLAY_PER_DAY:,}", style=f"bold {ORANGE}")
-        t.append(" / day", style="#d4d4d8")
-        return t
-
-    def _custom_detail(self) -> Text:
-        active = self.cursor == 1
-        arrow = f"bold {ORANGE}" if active else DIM
-        t = Text()
-        t.append("◀ ", style=arrow if self.per_day > CUSTOM_MIN else "#2e2e36")
-        t.append(f"{self.per_day:>5,}", style=f"bold {WHITE}")
-        t.append(" ▶", style=arrow if self.per_day < CUSTOM_MAX else "#2e2e36")
-        t.append(" levels / day", style="#d4d4d8")
-        t.append(f"   max {CUSTOM_MAX:,}", style=DIM)
-        return t
-
     def _goal_summary(self) -> str:
         if self.mode == "play":
             return f"{PLAY_TOTAL:,} levels · {PLAY_DAYS} days"
         if self.mode == "custom":
-            return f"{self.per_day:,} levels / day"
+            return f"custom · {self.app.custom_schedule().per_day:,} / day"
         return "one level"
+
+
+# ---- screen 2b: custom settings ----------------------------------------------------
+
+
+@dataclass
+class Knob:
+    """One adjustable custom setting, shown as a single centre value."""
+
+    name: str
+    get: Callable[[Schedule], float]
+    set: Callable[[Schedule, float], None]
+    lo: float
+    hi: float
+    step: float
+    fmt: Callable[[float], str]
+    note: str
+
+
+def _spread(s: Schedule, hours: float) -> None:
+    s.hours_min, s.hours_max = round(hours * 0.8 * 2) / 2, round(hours * 1.2 * 2) / 2
+
+
+def _break_every(s: Schedule, minutes: float) -> None:
+    s.break_every_min, s.break_every_max = round(minutes * 2 / 3), round(minutes * 4 / 3)
+
+
+def _break_len(s: Schedule, minutes: float) -> None:
+    s.break_len_min, s.break_len_max = max(1, round(minutes - 5)), round(minutes + 5)
+
+
+KNOBS = [
+    Knob(
+        "Levels per day",
+        lambda s: s.per_day,
+        lambda s, v: setattr(s, "per_day", int(v)),
+        CUSTOM_MIN,
+        CUSTOM_MAX,
+        CUSTOM_STEP,
+        lambda v: f"{int(v):,}",
+        f"shift ←/→ {TIMES}10",
+    ),
+    Knob(
+        "Spread over",
+        lambda s: (s.hours_min + s.hours_max) / 2,
+        _spread,
+        0,
+        20,
+        1,
+        lambda v: f"~{v:g} h" if v else "flat out",
+        "varies ±20% a day · 0 = flat out",
+    ),
+    Knob(
+        "Break every",
+        lambda s: (s.break_every_min + s.break_every_max) / 2,
+        _break_every,
+        0,
+        240,
+        15,
+        lambda v: f"~{v:g} min" if v else "never",
+        "of play · varies ±33%",
+    ),
+    Knob(
+        "Break length",
+        lambda s: (s.break_len_min + s.break_len_max) / 2,
+        _break_len,
+        5,
+        120,
+        5,
+        lambda v: f"~{v:g} min",
+        "varies ±5 min",
+    ),
+    Knob(
+        "Day starts at",
+        lambda s: -1 if s.day_start is None else s.day_start,
+        lambda s, v: setattr(s, "day_start", None if v < 0 else v),
+        -1,
+        23,
+        1,
+        lambda v: "when started" if v < 0 else f"~{int(v):02d}:00",
+        "±45 min · the bot waits until then",
+    ),
+]
+
+
+class CustomScreen(Screen):
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("up", "move(-1)", "Up", show=False),
+        Binding("down", "move(1)", "Down", show=False),
+        Binding("left", "adjust(-1)", MINUS, show=False),
+        Binding("right", "adjust(1)", "+", show=False),
+        Binding("shift+left", "adjust(-10)", f"{MINUS}10", show=False),
+        Binding("shift+right", "adjust(10)", "+10", show=False),
+        Binding("enter", "play", "Play"),
+        Binding("escape", "back", "Back"),
+        Binding("q", "app.quit", "Quit"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor = 0  # rows 0..len(KNOBS)-1 are knobs, len(KNOBS) is PLAY
+
+    def compose(self) -> ComposeResult:
+        with Center():
+            yield Static(id="banner")
+        yield Static("Tune how the bot paces itself. Settings are remembered.", id="tagline")
+        with Center():
+            yield Static(id="modes", classes="panel")
+        with Center():
+            yield Static(id="play")
+        yield Static(id="hint")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#modes").border_title = "CUSTOM"
+        self.render_all()
+
+    def on_resize(self) -> None:
+        self.query_one("#banner", Static).update(banner(self.size.width, self.size.height - 26))
+
+    def action_move(self, step: int) -> None:
+        self.cursor = max(0, min(len(KNOBS), self.cursor + step))
+        self.render_all()
+
+    def action_adjust(self, steps: int) -> None:
+        if self.cursor >= len(KNOBS):
+            return
+        knob, s = KNOBS[self.cursor], self.app.custom_schedule()
+        knob.set(s, max(knob.lo, min(knob.hi, knob.get(s) + steps * knob.step)))
+        self.app.save_custom(s)
+        self.render_all()
+
+    def action_play(self) -> None:
+        if self.cursor < len(KNOBS):
+            self.cursor = len(KNOBS)
+            self.render_all()
+            return
+        goal = Goal.custom(self.app.progress(), self.app.custom_schedule())
+        self.app.push_screen(RunScreen(goal))
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    def render_all(self) -> None:
+        s = self.app.custom_schedule()
+        body = Text()
+        for i, knob in enumerate(KNOBS):
+            here = i == self.cursor
+            bg = f" on {CURSOR_BG}" if here else ""
+            v = knob.get(s)
+            arrow = f"bold {ORANGE}" if here else DIM
+            body.append(POINTER if here else "   ", style=f"bold {ORANGE}{bg}")
+            body.append(f"{knob.name:<16}", style=f"bold {WHITE}{bg}")
+            body.append("◀ ", style=f"{arrow if v > knob.lo else '#2e2e36'}{bg}")
+            body.append(f"{knob.fmt(v):^14}", style=f"bold {ORANGE}{bg}")
+            body.append(" ▶", style=f"{arrow if v < knob.hi else '#2e2e36'}{bg}")
+            body.append(f"   {knob.note:<46}", style=f"{DIM}{bg}")
+            if i < len(KNOBS) - 1:
+                body.append("\n\n")
+        body.append("\n\n   ", style=DIM)
+        body.append(s.summary(), style=DIM)
+        self.query_one("#modes", Static).update(body)
+
+        on_play = self.cursor == len(KNOBS)
+        button = Text(justify="center")
+        style = f"bold #0d0d10 on {ORANGE}" if on_play else f"bold {ORANGE} on #1b1b21"
+        button.append(f"   ▶  PLAY  ·  custom · {s.per_day:,} / day   ", style=style)
+        self.query_one("#play", Static).update(button)
+
+        hint = Text(f"↑/↓ move   ←/→ adjust (shift {TIMES}10)   ", style=DIM)
+        hint.append("enter", style=f"bold {ORANGE}")
+        hint.append(" play   ", style=DIM)
+        hint.append("esc", style=f"bold {ORANGE}")
+        hint.append(" back", style=DIM)
+        self.query_one("#hint", Static).update(hint)
 
 
 # ---- screen 3: live dashboard ------------------------------------------------------
@@ -550,10 +805,33 @@ class RunScreen(Screen):
         speed.append(" / hour", style=DIM)
         table.add_row("SPEED", speed)
 
+        pacer = getattr(bot, "pacer", None)
+        paced = pacer is not None and pacer.s.paced
+        if pacer is not None:
+            pace = Text()
+            if paced:
+                start, end = pacer.window()
+                pace.append(f"{_hm(start)} → {_hm(end)}", style=f"bold {WHITE}")
+                pace.append(" play window", style=DIM)
+            else:
+                pace.append("flat out", style=f"bold {WHITE}")
+            resting = getattr(bot, "resting_until", None)
+            next_break = pacer.next_break_at()
+            if resting:
+                pace.append("  ·  back at ", style=DIM)
+                pace.append(_hm(resting), style=f"bold {ORANGE}")
+            elif next_break:
+                pace.append("  ·  next break ", style=DIM)
+                pace.append(_hm(next_break), style=f"bold {WHITE}")
+            table.add_row("PACE", pace)
+
         if goal.per_day:
             left = max(0, goal.per_day - goal.done_today)
             if left == 0:
                 eta = Text("today's target done ✔", style="bold #4ade80")
+            elif paced:
+                eta = Text(f"~{_hm(pacer.window()[1])}", style=f"bold {WHITE}")
+                eta.append(f" paced finish ({left:,} left)", style=DIM)
             elif avg:
                 eta = Text(f"{fmt_duration(left * avg)}", style=f"bold {WHITE}")
                 eta.append(f" to today's target ({left:,} left)", style=DIM)
@@ -686,7 +964,7 @@ class WordsearchApp(App):
         *,
         dry_run: bool = False,
         bot_factory: BotFactory | None = None,
-        device_lister: Callable[[], list[AdbDevice]] = list_adb_devices,
+        device_lister: Callable[[], list[AdbDevice]] = list_devices,
     ) -> None:
         super().__init__()
         self.serial = serial
@@ -696,14 +974,24 @@ class WordsearchApp(App):
         self.bot_factory = bot_factory or self._real_bot
         self._log: deque[tuple[str, str, str]] = deque(maxlen=2000)
         self._log_lock = threading.Lock()
+        self._custom: Schedule | None = None
 
     def _real_bot(self, serial: str, goal: Goal) -> Any:
         from .bot import Bot
 
         return Bot(serial, self.root, goal, dry_run=self.dry_run)
 
+    def custom_schedule(self) -> Schedule:
+        if self._custom is None:
+            self._custom = load_custom(self.root / "local" / "settings.json")
+        return self._custom
+
+    def save_custom(self, schedule: Schedule) -> None:
+        self._custom = schedule
+        save_custom(self.root / "local" / "settings.json", schedule)
+
     def progress(self) -> Progress:
-        return Progress(self.root / "local" / "progress.json")
+        return Progress(local_file(self.root, self.serial, "progress.json"))
 
     def sink(self, ts: str, tag: str, msg: str) -> None:
         """Log sink, safe to call from any thread."""
