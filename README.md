@@ -128,7 +128,7 @@ Press `Ctrl+C` to stop cleanly. Progress is saved after every level.
 
 The calibration space is 1080×2400. Other resolutions are scaled to it.
 
-### iPhone (iOS 17+)
+### iPhone (iOS 27+)
 
 The iPhone backend uses pymobiledevice3 over USB. It needs a USB tunnel service running with admin rights.
 
@@ -150,7 +150,7 @@ The iPhone backend uses pymobiledevice3 over USB. It needs a USB tunnel service 
    ```
 6. Run `uv run wsbot` and pick the iPhone. A live viewer of the phone's screen runs at <http://127.0.0.1:8090/>.
 
-The iOS layout is calibrated on an iPhone SE (750×1334). Other models may need new safety zones in `ios_device.py`.
+The iOS layout is calibrated on an **iPhone SE (750×1334)** only. Other models (for example Face ID iPhones with taller screens) need a new scale factor, safety zones and possibly templates in `ios_device.py`; run `--calibrate` and check the overlay before letting the bot play.
 
 ## Adding a new popup
 
