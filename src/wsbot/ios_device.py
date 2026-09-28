@@ -152,8 +152,12 @@ class IOSGameDevice(BaseDevice):
         if self.dry_run:
             return True
         (sx, sy), (ex, ey) = self._px(*start), self._px(*end)
+        # One sample per frame (17 ms): a 3-sample, 40 ms drag landed only its first cell,
+        # so the liveness probe always read "IGNORED" and restarted the game forever.
+        steps = 8
+        path = [(sx + (ex - sx) * i / steps, sy + (ey - sy) * i / steps) for i in range(steps + 1)]
         with self.input_lock:
-            self.phone.hold([(sx, sy), ((sx + ex) / 2, (sy + ey) / 2), (ex, ey)])
+            self.phone.hold(path, step_ms=17)
         return True
 
     def release(self, end: tuple[int, int]) -> None:

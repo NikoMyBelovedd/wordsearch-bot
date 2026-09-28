@@ -40,6 +40,7 @@ TOUCHSCREEN = 257  # mainTouchscreen _ServiceID
 HOME = (0x0C, 0x40)  # consumer page, Menu = the Home button
 BTN_DOWN, BTN_UP = 1, 2
 START_CODE = b"\x00\x00\x00\x01"
+STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
 
 
 class IPhoneError(RuntimeError):
@@ -144,8 +145,14 @@ class IPhone:
         )
 
     async def _open(self) -> None:
+        from pymobiledevice3.remote.core_device import screen_stream
         from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
         from pymobiledevice3.tunneld.api import get_tunneld_devices
+
+        # The phone sends frames only when the screen changes, so the server's 5 s
+        # "no frames = stalled" watchdog restarted the stream whenever the board sat
+        # still (the bot thinking, a probe) and dropped the touches sent meanwhile.
+        screen_stream._STALL_RESTART_SECS = STALL_RESTART_S
 
         await self._close()
         rsds = await get_tunneld_devices()
@@ -237,7 +244,9 @@ class IPhone:
                 kind, au = body[0], body[1:]
                 if codec is None or kind == 2:  # 2 = keyframe after a restart: fresh decoder
                     codec = av.CodecContext.create("hevc", "r")
-                    codec.thread_type = "AUTO"
+                    # Not "AUTO": frame-threading workers hold our packets, and freeing
+                    # the old decoder (a restart, shutdown) then deadlocks on the GIL.
+                    codec.thread_type = "SLICE"
                 try:
                     decoded = codec.decode(av.Packet(_annexb(au)))
                 except av.error.FFmpegError:
@@ -286,6 +295,11 @@ class IPhone:
         )
 
     async def _send(self, state: int, x: int, y: int) -> None:
+        # Mid stream-restart the HID handles belong to the dying session: a touch sent
+        # then is dropped, and handles reopened then stay dead. Wait for the new stream.
+        deadline = time.monotonic() + 15
+        while self._srv._active_service is None and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
         await self._srv._ensure_hid()  # no-op unless a stream restart dropped the handles
         await self._srv._uhs.send_touchscreen(state, x, y, service_id=TOUCHSCREEN)
 

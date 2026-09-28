@@ -342,11 +342,19 @@ class Bot:
         if not self.device.hold(a, b):
             return None
         try:
-            time.sleep(0.2)
-            frame = self.watcher.latest(newer_than=time.monotonic(), timeout=1.5)
-            if frame is None or self.device.dry_run:
+            if self.device.dry_run:
                 return None
-            alive = all(highlighted(frame, board, *cell) for cell in pair)
+            # The selection can take ~0.5 s to show (iPhone), so watch frames for a while.
+            alive, seen = False, False
+            deadline = time.monotonic() + 2.0
+            while not alive and time.monotonic() < deadline:
+                frame = self.watcher.latest(newer_than=self.watcher.frame_time, timeout=0.5)
+                if frame is None:
+                    continue
+                seen = True
+                alive = all(highlighted(frame, board, *cell) for cell in pair)
+            if not seen:
+                return None
         finally:
             self.device.release(b)
         log("PROBE", f"drag {pair[0]}->{pair[1]}: {'registered' if alive else 'IGNORED'}")
@@ -465,6 +473,7 @@ class Bot:
                     break
                 if not finished:
                     restarts_this_level += 1
+                    self._forget_swiped(everything=restarts_this_level >= 3)
                     self._dump("level_stuck")
                     self.restart_app(f"level stuck after every pass (try {restarts_this_level})")
                     previous = None  # the same level comes back after a restart
@@ -479,7 +488,11 @@ class Bot:
                 previous = grid
                 self._pace(dt)
         finally:
+            # Stop the watcher before the device closes, or its next tick sees the phone
+            # gone and tries to reconnect it.
             self.watcher.stop()
+            if self.watcher.is_alive():
+                self.watcher.join(timeout=10)
             self.device.close()
             self.status = "stopped"
 
@@ -533,6 +546,20 @@ class Bot:
             return set(data["words"]), data["grid"]
         except (OSError, ValueError, KeyError):
             return set(), None
+
+    def _forget_swiped(self, *, everything: bool) -> None:
+        """A stuck level gets a fresh try: swipes fired while the game ignored input
+        (a tutorial, a half-closed popup) never counted, and kept as "swiped" they were
+        never fired again. Lines outside the dictionary go first (SCAVENGER was one:
+        swiped once into a blocked board, then skipped on 27 restarts); from the third
+        try, every word, accepting a few "already collected" toasts."""
+        before = len(self.swiped)
+        if everything:
+            self.swiped.clear()
+        else:
+            self.swiped = {w for w in self.swiped if w in self.words.rank}
+        self._save_swiped()
+        log("RECOVERY", f"will re-swipe {before - len(self.swiped)} words on this level")
 
     def _save_swiped(self) -> None:
         data = {"grid": self._swiped_grid, "words": sorted(self.swiped)}
