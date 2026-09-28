@@ -78,6 +78,9 @@ class IOSGameDevice(BaseDevice):
         self._seq, _, img = self.phone.latest()
         return cv2.resize(img, self.calib, interpolation=cv2.INTER_LINEAR)
 
+    def view_stale(self) -> bool:
+        return self.phone.frozen
+
     def reconnect(self) -> None:
         """Frames failing: reopen the USB session (stream server + touch)."""
         try:

@@ -96,6 +96,7 @@ class Bot:
         self.level_started = 0.0
         self.board_center = self.device.board_center  # middle of the board; updated each level
         self.clear_taps = 0
+        self._input_blocked = False
         # Words swiped on the current level, saved so a bot restart mid-level doesn't
         # re-swipe them (each re-swipe of a taken word pops a toast).
         self._swiped_path = local_file(root, serial, "level_swiped.json")
@@ -286,6 +287,7 @@ class Bot:
             ("repeat", lambda: self._unlit(board, hits), p.refire_swipe_ms, p.refire_gap_s, 0),
         ]
         self._checked_lit = set()
+        self._input_blocked = False
         try:
             for name, pick, ms, gap, check_every in passes:
                 todo = pick()
@@ -302,6 +304,7 @@ class Bot:
         except InputBlocked:
             self._dump("input_blocked")
             log("WARN", "the game ignores touches on the board; restarting")
+            self._input_blocked = True
         return False
 
     def _check_input(self, board: Board, lit: set[tuple[int, int]] | None) -> None:
@@ -338,6 +341,13 @@ class Bot:
         )
         if pair is None or not self.watcher.board_visible or self.watcher.busy():
             return None
+        # A frozen iPhone picture showed every drag as IGNORED and looped restarts.
+        deadline = time.monotonic() + 10.0
+        while self.device.view_stale() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if self.device.view_stale():
+            log("PROBE", "screen picture is frozen; can't tell")
+            return None
         a, b = (board.cell(*cell).center for cell in pair)
         if not self.device.hold(a, b):
             return None
@@ -353,7 +363,7 @@ class Bot:
                     continue
                 seen = True
                 alive = all(highlighted(frame, board, *cell) for cell in pair)
-            if not seen:
+            if not seen or (not alive and self.device.view_stale()):
                 return None
         finally:
             self.device.release(b)
@@ -473,7 +483,8 @@ class Bot:
                     break
                 if not finished:
                     restarts_this_level += 1
-                    self._forget_swiped(everything=restarts_this_level >= 3)
+                    # Swipes into a board that ignored touches never counted: fire them again.
+                    self._forget_swiped(everything=restarts_this_level >= 3 or self._input_blocked)
                     self._dump("level_stuck")
                     self.restart_app(f"level stuck after every pass (try {restarts_this_level})")
                     previous = None  # the same level comes back after a restart

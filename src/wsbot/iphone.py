@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import http.client
+import logging
 import threading
 import time
 
@@ -41,6 +42,28 @@ HOME = (0x0C, 0x40)  # consumer page, Menu = the Home button
 BTN_DOWN, BTN_UP = 1, 2
 START_CODE = b"\x00\x00\x00\x01"
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
+# After a lost packet the stream server holds every frame until the phone sends a
+# keyframe. It asks once; when the phone ignores that, the picture stays frozen while
+# the phone keeps streaming (so the stall watchdog never fires), and the bot acted on
+# a stale screen for 20-60 s: "touches ignored" restart loops, Next Level tapped 10x.
+KEY_RETRY_S = 1.5  # frozen this long: ask for a keyframe again (and every KEY_RETRY_S)
+KEY_RESTART_S = 6.0  # still frozen: restart the stream session
+KEY_RESTART_COOLDOWN_S = 20.0
+
+
+class _StreamLog(logging.Handler):
+    """pymobiledevice3's stream warnings (restarts, stalls) into the bot log."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if "AAC" not in msg:  # audio track noise: "AAC-ELD decode requires macOS"
+            log("WARN", f"iPhone stream: {msg}")
+
+
+_stream_logger = logging.getLogger("pymobiledevice3.remote.core_device.screen_stream")
+if not any(isinstance(h, _StreamLog) for h in _stream_logger.handlers):
+    _h = _StreamLog(logging.WARNING)
+    _stream_logger.addHandler(_h)
 
 
 class IPhoneError(RuntimeError):
@@ -89,6 +112,7 @@ class IPhone:
         threading.Thread(target=self._loop.run_forever, name="iphone-loop", daemon=True).start()
         self._srv = None
         self._serve_task: asyncio.Task | None = None
+        self._key_task: asyncio.Task | None = None
         self._rsd = None
         self._held: tuple[int, int] | None = None
         # frames
@@ -195,6 +219,7 @@ class IPhone:
             await rsd.close()
             raise
         self._srv, self._serve_task, self._rsd = srv, task, rsd
+        self._key_task = asyncio.create_task(self._keyframe_watchdog(srv), name="keyframe-watchdog")
         self._held = None
         self.udid = rsd.udid
         log(
@@ -204,6 +229,9 @@ class IPhone:
 
     async def _close(self) -> None:
         task, rsd = self._serve_task, self._rsd
+        if self._key_task is not None:
+            self._key_task.cancel()
+            self._key_task = None
         self._srv = self._serve_task = self._rsd = None
         if task is not None:
             task.cancel()  # serve() stops the device-side streams in its finally
@@ -212,6 +240,54 @@ class IPhone:
         if rsd is not None:
             with contextlib.suppress(Exception):
                 await rsd.close()
+
+    # ---- frozen picture ---------------------------------------------------------------
+
+    def _frozen_since(self, srv) -> float | None:
+        """Loop time since which our /stream.bin subscriber waits for a keyframe."""
+        try:
+            states = list(srv._subscribers.values())
+        except (AttributeError, RuntimeError):
+            return None
+        waiting = [s.needs_key_since for s in states if s.needs_key]
+        return min(waiting) if waiting else None
+
+    @property
+    def frozen(self) -> bool:
+        """The latest frame may be stale: frames are held back until a keyframe."""
+        srv = self._srv
+        if srv is None:
+            return False
+        since = self._frozen_since(srv)
+        return since is not None and time.monotonic() - since > 0.3
+
+    async def _keyframe_watchdog(self, srv) -> None:
+        loop = asyncio.get_running_loop()
+        episode: float | None = None
+        last_ask = last_restart = 0.0
+        while True:
+            await asyncio.sleep(0.25)
+            now = loop.time()
+            since = self._frozen_since(srv)
+            if since is None:
+                if episode is not None and now - episode > KEY_RETRY_S:
+                    log("LOG", f"iPhone stream: picture was frozen {now - episode:.1f}s, recovered")
+                episode = None
+                continue
+            episode = since if episode is None else min(episode, since)
+            age = now - episode
+            if age > KEY_RESTART_S and now - last_restart > KEY_RESTART_COOLDOWN_S:
+                last_restart = now
+                log("RECOVERY", f"iPhone stream frozen {age:.0f}s (no keyframe); restarting it")
+                try:
+                    await asyncio.wait_for(srv._ensure_fresh_stream(force=True), timeout=10.0)
+                except Exception as exc:
+                    log("WARN", f"iPhone stream restart failed: {exc!r}")
+                continue
+            if age > KEY_RETRY_S and now - last_ask > KEY_RETRY_S:
+                last_ask = now
+                with contextlib.suppress(Exception):
+                    srv._request_recovery_idr(reason="wsbot-frozen")
 
     # ---- frames ---------------------------------------------------------------------
 

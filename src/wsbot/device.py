@@ -118,6 +118,10 @@ class BaseDevice:
                 log("SAFETY", f"refused {what} at ({x},{y}) inside {name}")
                 raise SafetyError(name)
 
+    def view_stale(self) -> bool:
+        """The latest frame may not show the screen as it is now (iOS stream hiccup)."""
+        return False
+
     def close(self) -> None:
         pass
 
