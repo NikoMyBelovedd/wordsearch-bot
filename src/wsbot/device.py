@@ -97,6 +97,7 @@ class BaseDevice:
     swipe_ms = 60  # fast-pass finger travel time
     dry_run = False
     below_board_y: int | None = None
+    last_panel: tuple[int, int, int, int] | None = None  # board of the latest level
     refused = 0
 
     def set_dynamic_zone(self, name: str, rect: tuple[int, int, int, int] | None) -> None:

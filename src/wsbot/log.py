@@ -20,6 +20,7 @@ ALIASES = {"WATCHER": "POPUP-WATCHER", "WARN": "WARNING"}
 GENERAL = {"DEVICE", "LETTERS", "APP", "WAIT", "PAUSE", "DIAG", "OCR", "GOAL", "PASS", "PROBE"}
 
 _sinks: list[Sink] = []
+_sticky: list[Sink] = []  # survive set_sinks (DEVTEST debug.log mirror)
 _lock = threading.Lock()
 
 
@@ -46,7 +47,13 @@ def file_sink(path, max_bytes: int = 5_000_000, backups: int = 5) -> Sink:
 def set_sinks(*sinks: Sink) -> None:
     """Replace every sink (the TUI swaps stdout out for its log panel)."""
     with _lock:
-        _sinks[:] = sinks
+        _sinks[:] = [*sinks, *_sticky]
+
+
+def add_sticky_sink(sink: Sink) -> None:
+    with _lock:
+        _sticky.append(sink)
+        _sinks.append(sink)
 
 
 def log(tag: str, msg: str) -> None:

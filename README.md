@@ -60,7 +60,7 @@ You don't need to know how to code. You'll copy and paste a few commands, and th
 - **A USB cable** that carries data, not just charging. The one that came with your phone is usually fine.
 - **One of these phones**, with *Word Search Explorer* installed from the Play Store or App Store:
   - **An Android phone**, any recent model. An Android emulator on your computer works too.
-  - **An iPhone on iOS 27 or newer.** The iPhone screen layout is only tuned for an **iPhone SE (3rd generation)** so far. Other iPhones may need extra setup (see the [FAQ](#faq)).
+  - **An iPhone on iOS 27 or newer.** Tested on the **iPhone SE (3rd generation)** and the **iPhone 17**. Other Face ID iPhones use the iPhone 17 layout and should work too (see the [FAQ](#faq)).
 - About **20 minutes** for the first setup. After that, starting the bot takes a few seconds.
 
 > **Before you start:** open *Word Search Explorer* on the phone and play the first few tutorial levels by hand, so the game's intro is out of the way.
@@ -211,7 +211,7 @@ This path talks to the iPhone over USB with [pymobiledevice3](https://github.com
 3. Turn on **Settings → Developer → UI Automation**. It lets the computer send touches.
 4. Set **Settings → Display & Brightness → Auto-Lock → Never**, so the screen doesn't lock mid-game.
 
-**On the computer, every time you use the bot:** start the **tunnel**, a helper that must keep running in its own terminal window while the bot plays. It needs admin rights.
+**On the computer, every time you use the bot (Windows and Linux only):** start the **tunnel**, a helper that must keep running in its own terminal window while the bot plays. It needs admin rights. **On a Mac, skip this:** the bot opens its own tunnel, and a separate tunnel window only gets in the way (the Mac firewall can block the phone's video through it).
 
 <details open>
 <summary><b>Windows</b></summary>
@@ -226,7 +226,7 @@ This path talks to the iPhone over USB with [pymobiledevice3](https://github.com
 </details>
 
 <details>
-<summary><b>macOS / Linux</b></summary>
+<summary><b>Linux</b></summary>
 
 In a terminal, `cd` into the bot's folder and run the command below. Enter your computer password when asked. Nothing shows as you type, which is normal.
 
@@ -244,7 +244,7 @@ Leave this terminal open, and open a second terminal for the bot.
 uv run pymobiledevice3 mounter auto-mount --tunnel ''
 ```
 
-It's fine if it says the image is already mounted.
+On a Mac (no tunnel window), leave out the tunnel part: `uv run pymobiledevice3 mounter auto-mount`. It's fine if it says the image is already mounted.
 
 ## Step 5: start the bot
 
@@ -314,7 +314,7 @@ When something goes wrong, the bot saves a screenshot in the **`diagnostics`** f
 |---|---|
 | `uv` / `adb` is "not recognized" or "not found" | Close the terminal and open a new one. If it still fails, repeat [Step 2](#step-2-install-the-tools). |
 | Android phone not in the device list | Run `adb devices`. If it's empty, try another cable or USB port (some cables only charge). If it says `unauthorized`, unlock the phone and tap **Allow** on the popup. |
-| `no USB tunnel for an iPhone` | The tunnel isn't running. Start it again ([Step 4 → iPhone](#iphone)) and keep that window open. Make sure the phone is unlocked and you tapped **Trust**. |
+| `waiting for the iPhone` / `no USB tunnel for an iPhone` | The bot waits until the phone shows up. On Windows/Linux the tunnel isn't running: start it again ([Step 4 → iPhone](#iphone)) and keep that window open. Make sure the phone is plugged in, unlocked, and you tapped **Trust**. |
 | `screen stream did not start` | Mount the Developer Disk Image again (the `mounter auto-mount` command in Step 4). Check that **UI Automation** is still on. |
 | iPhone was working, then "disappeared" while still plugged in | Unplug it and plug it back in, then restart the tunnel. On Linux you can instead run `sudo systemctl restart usbmuxd` and restart the tunnel. |
 | iPhone missing from the list on Windows | Install the **Apple Devices** app (or iTunes). It has the USB driver. |
@@ -342,7 +342,7 @@ Yes. Keep the terminal window open, and keep the computer from going to sleep.
 Not for the game. Press **P** to pause first if you need to.
 
 **Does it work on my iPhone model?**
-It needs iOS 27 or newer. The layout is tuned on an iPhone SE (3rd generation) only. Other models (for example Face ID iPhones with taller screens) need a new scale factor and safety zones in `src/wsbot/ios_device.py`. Run `uv run wsbot --calibrate` and check the overlay picture before letting it play.
+It needs iOS 27 or newer. It's tested on the iPhone SE (3rd generation) and the iPhone 17. Home-button iPhones (SE 2/3) use the SE layout; every Face ID iPhone uses the iPhone 17 layout, which finds the game's top bar on the live screen, so other models should work too. If yours doesn't, run it with `--debug`, then `uv run wsbot --report`, and send the `wsbot-report.zip` it makes (open an issue on GitHub), or add the support yourself and send a pull request.
 
 **Will it get my account banned?**
 It might; automating a game can break its terms of service. See the [disclaimer](#disclaimer).
@@ -388,6 +388,8 @@ uv run wsbot --headless --serial emulator-5554 --fast --levels 20
 | `--diagnose` | Scores every popup template against the current screen. |
 | `--calibrate` | Saves an annotated picture (board, no-go zones, popups) to `diagnostics/`. |
 | `--capture NAME [--crop X,Y,W,H] [--level-done]` | Saves a new popup template from the screen and registers it. |
+| `--debug` | Writes detailed logs (`local/debug.log`) and screen snapshots (`diagnostics/debug/`) for bug reports. Same as setting `WSBOT_DEBUG=1`. |
+| `--report` | Zips the logs, system info and newest screenshots into `wsbot-report.zip` (under 14 MB, small enough for Discord). |
 
 Logs are also written to `local/wsbot.log`.
 
@@ -430,7 +432,7 @@ Crop from **inside** the button (x, y, width, height, in the full-screen picture
 | Module | Role |
 |---|---|
 | `device.py` | Android backend: uiautomator2 screenshots with an `adb screencap` fallback, and one persistent `adb shell` for fast input. Also the safety zones. |
-| `iphone.py` / `ios_device.py` | iOS backend: the phone's screen stream (HEVC, decoded with PyAV) and HID touch reports via pymobiledevice3's CoreDevice services. Frames are scaled so the Android calibration and templates apply. |
+| `iphone.py` / `ios_device.py` | iOS backend: the phone's screen stream (HEVC, decoded with PyAV) and HID touch reports via pymobiledevice3's CoreDevice services. Frames are scaled so the Android calibration and templates apply. Two layouts: `se` (home-button iPhones, fixed zones) and `tall` (Face ID iPhones: zones placed from the top bar found on the live screen). On macOS it opens its own USB tunnel (`WSBOT_TUNNEL=auto\|userspace\|tunneld`). |
 | `board.py` | Panel and grid detection, partial-board rejection, highlighted-cell detection. |
 | `letters.py` | Glyph reading (64×64 templates plus Tesseract). |
 | `solver.py` | Dictionary prefix search. |
@@ -455,7 +457,8 @@ CI runs lint, the tests, and a CLI start-up check on **Windows, Linux and macOS*
 ```
 src/wsbot/          the bot
 templates/          Android popup templates + registry, letter templates
-templates/ios/      iPhone popup templates + registry
+templates/ios/      iPhone SE popup templates + registry
+templates/ios_tall/ Face ID iPhone popup templates, registry + top-bar anchors
 data/words.txt      200k-word frequency-ordered dictionary
 tools/              reference-glyph renderer, TUI demo
 tests/              smoke tests

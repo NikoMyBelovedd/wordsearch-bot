@@ -106,9 +106,6 @@ def list_adb_devices() -> list[AdbDevice]:
     return devices
 
 
-IPHONE_NAMES = {"iPhone14,6": "iPhone SE 3", "iPhone12,8": "iPhone SE 2", "iPhone14,7": "iPhone 14"}
-
-
 def _usb_iphones() -> dict[str, str]:
     """UDID -> "model · iOS x.y" for iPhones usbmux sees (usbmuxd on Linux/macOS, the Apple
     Mobile Device Service on Windows). Empty when there is no usbmux or pymobiledevice3."""
@@ -117,6 +114,8 @@ def _usb_iphones() -> dict[str, str]:
     async def scan() -> dict[str, str]:
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.usbmux import list_devices as mux_devices
+
+        from .ios_device import model_name
 
         found: dict[str, str] = {}
         for dev in await mux_devices():
@@ -127,7 +126,7 @@ def _usb_iphones() -> dict[str, str]:
                 lockdown = await create_using_usbmux(dev.serial, autopair=False)
                 try:
                     kind = lockdown.all_values.get("ProductType", "")
-                    name = IPHONE_NAMES.get(kind, kind or "iPhone")
+                    name = model_name(kind)
                     label = f"{name} · iOS {lockdown.product_version}"
                 finally:
                     await lockdown.close()
@@ -159,6 +158,10 @@ def list_ios_devices() -> list[AdbDevice]:
     except (OSError, ValueError):
         tunnels = set()
     labels = _usb_iphones()
+    from .iphone import use_userspace_tunnel
+
+    if use_userspace_tunnel():  # the bot opens its own tunnel: any trusted USB iPhone works
+        tunnels |= set(labels)
     on_usb = set(labels) | tunnels
     devices = []
     for udid in sorted(on_usb):
@@ -685,8 +688,15 @@ class RunScreen(Screen):
     def _run_bot(self) -> None:
         try:
             self.bot = self.app.bot_factory(self.app.serial, self.goal)
+            if self.stopping:  # stop was pressed while it was connecting
+                self.bot.stop_event.set()
             self.bot.run()
         except Exception as exc:  # show it; the UI must outlive any bot failure
+            import traceback
+
+            from .debug import dbg
+
+            dbg(f"bot crashed: {traceback.format_exc()}")
             self.error = f"{type(exc).__name__}: {exc}"
             self.app.sink(time.strftime("%H:%M:%S"), "ERROR", f"bot crashed: {self.error}")
 
@@ -710,6 +720,10 @@ class RunScreen(Screen):
             self.app.pop_screen()
             return
         self.stopping = True
+        if self.bot is None and self.app.serial.startswith("ios"):
+            from .ios_device import cancel_connect
+
+            cancel_connect()  # still waiting for the iPhone to show up
         if self.bot is not None:
             self.bot.pause_event.clear()
             self.bot.stop_event.set()

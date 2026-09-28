@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .board import Board, highlighted, read_board
+from .debug import dbg, snap
 from .device import open_device
 from .goal import Goal, local_file, seconds_until_midnight
 from .imgio import imwrite
@@ -436,6 +437,10 @@ class Bot:
     # ---- main loop -------------------------------------------------------------
 
     def run(self) -> None:
+        dbg(
+            f"bot run: device={type(self.device).__name__} calib={self.device.calib} "
+            f"templates={self.device.templates} popups={[p.name for p in self.watcher.popups]}"
+        )
         self.watcher.start()
         previous: list[str] | None = None
         restarts_this_level = 0
@@ -471,6 +476,13 @@ class Bot:
                 self.watcher.level_done.clear()
                 self.watcher.expected_panel = board.panel
                 self.device.below_board_y = board.panel[1] + board.panel[3] + 5
+                self.device.last_panel = board.panel
+                snap("level_start", self.watcher.frame, every_s=0, note=f"{board.panel} {grid}")
+                dbg(
+                    f"board panel={board.panel} {board.rows}x{board.cols} "
+                    f"letter_h={board.letter_h:.1f} calib={self.device.calib} "
+                    f"zones={getattr(self.device, 'zones', None)}"
+                )
                 self.grid, self.fired_cells, self.found_cells = grid, set(), set()
                 self.level_started = t0 = time.monotonic()
                 n = self.goal.done_total + 1
@@ -589,6 +601,10 @@ class Bot:
         path = self.diagnostics / f"{why}_{time.strftime('%Y%m%d_%H%M%S')}.png"
         imwrite(path, frame)
         log("DIAG", f"saved {path.name}")
+        dbg(
+            f"dump {why}: watcher hits={dict(self.watcher.hits)} "
+            f"board_visible={self.watcher.board_visible} fps={self.watcher.fps:.1f}"
+        )
         dumps = sorted(self.diagnostics.glob("*.png"), key=lambda p: p.stat().st_mtime)
         for old in dumps[:-MAX_DIAGNOSTICS]:
             old.unlink(missing_ok=True)

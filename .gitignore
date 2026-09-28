@@ -7,3 +7,5 @@ diagnostics/
 local/
 .pytest_cache/
 HANDOFF.md
+DEVTEST/
+DEVTEST*.zip

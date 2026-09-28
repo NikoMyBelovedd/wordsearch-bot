@@ -34,9 +34,20 @@ def main() -> None:
     p.add_argument("--capture", metavar="NAME", help="save a popup template from the screen")
     p.add_argument("--crop", metavar="X,Y,W,H", help="crop box for --capture (calib space)")
     p.add_argument("--level-done", action="store_true", help="--capture: marks level end")
+    p.add_argument("--report", action="store_true", help="zip logs + screenshots to send back")
+    p.add_argument(
+        "--debug", action="store_true", help="detailed logs + snapshots for --report ($WSBOT_DEBUG)"
+    )
     args = p.parse_args()
     serial = args.serial or os.environ.get("WSBOT_SERIAL") or DEFAULT_SERIAL
+    if args.report:
+        from .debug import make_report
 
+        return make_report(ROOT)
+    if args.debug or os.environ.get("WSBOT_DEBUG"):
+        from .debug import setup
+
+        setup(ROOT)
     if args.capture:
         return capture(serial, args.capture, args.crop, args.level_done)
     if args.diagnose or args.calibrate:

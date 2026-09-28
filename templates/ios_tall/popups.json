@@ -1,5 +1,25 @@
 [
   {
+    "name": "video_2x",
+    "file": "video_2x.png",
+    "threshold": 0.8,
+    "avoid": true,
+    "avoid_pad": [
+      60,
+      40
+    ]
+  },
+  {
+    "name": "remove_ads",
+    "file": "remove_ads.png",
+    "threshold": 0.8,
+    "avoid": true,
+    "avoid_pad": [
+      40,
+      40
+    ]
+  },
+  {
     "name": "get_reward",
     "file": "get_reward.png",
     "threshold": 0.85,
@@ -65,10 +85,7 @@
     "file": "tutorial_claim_bonus.png",
     "threshold": 0.85,
     "cooldown": 3.0,
-    "tap_point": [
-      225,
-      135
-    ],
+    "tap_point": "@star",
     "allow": "star_bonus_jar"
   },
   {
@@ -76,10 +93,7 @@
     "file": "tutorial_daily_challenge.png",
     "threshold": 0.85,
     "cooldown": 3.0,
-    "tap_point": [
-      172,
-      1915
-    ],
+    "tap_point": "@calendar",
     "allow": "below_board"
   },
   {
@@ -87,10 +101,7 @@
     "file": "tutorial_tournament.png",
     "threshold": 0.85,
     "cooldown": 3.0,
-    "tap_point": [
-      109,
-      530
-    ]
+    "tap_point": "@trophy"
   },
   {
     "name": "bonus_claim",

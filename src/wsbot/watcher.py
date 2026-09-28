@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from .board import covered_below, find_panel, read_board
+from .debug import dbg, snap
 from .device import Device
 from .imgio import imread, imwrite
 from .log import log
@@ -40,7 +41,8 @@ class Popup:
     cooldown: float
     level_done: bool  # seeing this means the level is over
     tap: bool
-    tap_point: tuple[int, int] | None = None  # tap here instead of the match center
+    # tap here instead of the match center; "@name" = a device anchor (see ios_device.py)
+    tap_point: tuple[int, int] | str | None = None
     allow: str | None = None  # forbidden zone this entry may tap (see device.py)
     confirm: int = 1  # consecutive matching frames required before acting
     blocking: bool = True  # False: tapping it doesn't make the bot wait (a toast)
@@ -69,7 +71,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 cooldown=e.get("cooldown", 1.5),
                 level_done=e.get("level_done", False),
                 tap=e.get("tap", True),
-                tap_point=tuple(e["tap_point"]) if "tap_point" in e else None,
+                tap_point=_tap_point(e.get("tap_point")),
                 allow=e.get("allow"),
                 confirm=e.get("confirm", 1),
                 blocking=e.get("blocking", True),
@@ -80,6 +82,12 @@ def load_popups(folder: Path) -> list[Popup]:
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
     return popups
+
+
+def _tap_point(value) -> tuple[int, int] | str | None:
+    if value is None or isinstance(value, str):
+        return value
+    return tuple(value)
 
 
 def match(small_frame: np.ndarray, popup: Popup) -> tuple[float, tuple[int, int]]:
@@ -117,6 +125,7 @@ class PopupWatcher(threading.Thread):
         self._hidden_since: float | None = None
         self._last_unknown_dump = 0.0
         self._last_app_check = 0.0
+        self._last_score_log = 0.0
 
     # ---- API for the main thread -------------------------------------------
 
@@ -171,6 +180,7 @@ class PopupWatcher(threading.Thread):
             self._frame_cond.notify_all()
 
         small = cv2.resize(frame, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
+        snap("calib_frame", frame, every_s=15, note=f"board_visible={self.board_visible}")
         matched = self._handle_popups(small, now)
         if matched or self.board_visible:
             self._hidden_since = None
@@ -207,12 +217,14 @@ class PopupWatcher(threading.Thread):
     def _handle_popups(self, small: np.ndarray, now: float) -> bool:
         """Act on the highest-priority popup that is on screen. True if any matched."""
         hit = None
+        scores = []
         for popup in self.popups:
             try:
                 score, center = match(small, popup)
             except Exception as exc:
                 log("ERROR", f"match {popup.name} failed: {exc!r}")
                 continue
+            scores.append((score, popup.name, center))
             if popup.avoid:
                 self._guard(popup, center if score >= popup.threshold else None)
                 continue
@@ -222,6 +234,13 @@ class PopupWatcher(threading.Thread):
                     hit = (popup, score, center)
             else:
                 popup.streak = 0
+        if now - self._last_score_log > 1.0:
+            self._last_score_log = now
+            top = sorted(scores, reverse=True)[:4]
+            dbg(
+                f"watcher: board_visible={self.board_visible} fps={self.fps:.1f} "
+                f"expected={self.expected_panel} top={[(n, round(sc, 3), c) for sc, n, c in top]}"
+            )
         if hit is None:
             return False
         popup, score, center = hit
@@ -244,6 +263,11 @@ class PopupWatcher(threading.Thread):
                 self.last_action = now
             self._last_tap = now
             target = popup.tap_point or center
+            if isinstance(target, str):
+                anchor = getattr(self.device, "anchor", lambda _: None)(target.lstrip("@"))
+                if anchor is None:
+                    log("WARN", f"{popup.name}: anchor {target} not known yet; tapping the match")
+                target = anchor or center
             self.device.tap(*target, why=popup.name, allow=popup.allow)
         return True
 
