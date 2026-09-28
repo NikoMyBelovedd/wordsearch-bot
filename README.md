@@ -7,6 +7,7 @@
 It looks at the phone's screen, reads the letter board, finds the words, and swipes them in by itself.
 It closes popups, recovers when the game gets stuck, and can play thousands of levels without you touching anything.
 
+[![Release](https://img.shields.io/github/v/release/NikoMyBelovedd/wordsearch-bot?color=orange)](https://github.com/NikoMyBelovedd/wordsearch-bot/releases/latest)
 [![CI](https://github.com/NikoMyBelovedd/wordsearch-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/NikoMyBelovedd/wordsearch-bot/actions/workflows/ci.yml)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
 ![Platforms](https://img.shields.io/badge/runs%20on-Windows%20%7C%20Linux%20%7C%20macOS-555)
@@ -27,7 +28,7 @@ It closes popups, recovers when the game gets stuck, and can play thousands of l
 6. [Step 4: prepare your phone](#step-4-prepare-your-phone) ([Android](#android-phone-or-emulator) · [iPhone](#iphone))
 7. [Step 5: start the bot](#step-5-start-the-bot)
 8. [Using the bot's screens](#using-the-bots-screens)
-9. [Stopping, pausing and resuming](#stopping-pausing-and-resuming)
+9. [Stopping, pausing and resuming](#stopping-pausing-and-resuming) · [Updating](#updating-to-a-new-version)
 10. [Troubleshooting](#troubleshooting)
 11. [FAQ](#faq)
 12. [Glossary](#glossary)
@@ -152,9 +153,9 @@ Then Tesseract and adb from your package manager:
 
 **Easiest way (no git needed):**
 
-1. Download **[wordsearch-bot-main.zip](https://github.com/NikoMyBelovedd/wordsearch-bot/archive/refs/heads/main.zip)**.
+1. Download **[wordsearch-bot.zip](https://github.com/NikoMyBelovedd/wordsearch-bot/releases/latest/download/wordsearch-bot.zip)** (the latest release; older versions and what changed are on the [Releases page](https://github.com/NikoMyBelovedd/wordsearch-bot/releases)).
 2. Unzip it (right-click the file → *Extract All* on Windows; double-click on a Mac).
-3. Move the extracted **`wordsearch-bot-main`** folder somewhere easy to find, like your **Documents** folder.
+3. Move the extracted **`wordsearch-bot`** folder somewhere easy to find, like your **Documents** folder.
 
 <details>
 <summary>Or with git, if you have it</summary>
@@ -168,7 +169,7 @@ git clone https://github.com/NikoMyBelovedd/wordsearch-bot.git
 **Now point the terminal at that folder.** Type `cd ` (the letters c, d and a space), then **drag the folder from your file manager into the terminal window**, and press **Enter**. The folder's path appears on its own. For example:
 
 ```bash
-cd ~/Documents/wordsearch-bot-main
+cd ~/Documents/wordsearch-bot
 ```
 
 **Download everything the bot uses** (about 300 MB, one time only):
@@ -293,6 +294,16 @@ Then move to **▶ PLAY** and press **Enter**.
 - **Resume:** start the bot again. Progress is saved after every level, so the daily count and plan carry on where they left off. If you stop mid-level, it remembers which words it already swiped there.
 - Your progress lives in the **`local`** folder inside the bot's folder. Android and iPhone keep separate files, because they are separate game accounts. Deleting that folder resets the bot's counters; your progress in the game itself is kept.
 
+
+## Updating to a new version
+
+1. Stop the bot.
+2. Download the new **[wordsearch-bot.zip](https://github.com/NikoMyBelovedd/wordsearch-bot/releases/latest/download/wordsearch-bot.zip)** and unzip it.
+3. **Copy the `local` folder** from your old bot folder into the new one. It holds your progress and settings.
+4. Delete the old folder, and use the new one from now on (run `uv sync` in it once, as in Step 3).
+
+The [Releases page](https://github.com/NikoMyBelovedd/wordsearch-bot/releases) lists what changed in each version. Click **Watch → Custom → Releases** at the top of the GitHub page to get an email when a new one comes out.
+
 ---
 
 ## Troubleshooting
@@ -344,7 +355,7 @@ Yes, see `--headless` below.
 | Word | Meaning |
 |---|---|
 | **Terminal** | A text window where you type commands (PowerShell on Windows, Terminal on Mac/Linux). |
-| **Folder path** | Where a folder lives, like `C:\Users\you\Documents\wordsearch-bot-main`. |
+| **Folder path** | Where a folder lives, like `C:\Users\you\Documents\wordsearch-bot`. |
 | **`cd`** | "Change directory": makes the terminal work inside a folder. |
 | **adb** | Android Debug Bridge: the tool computers use to control Android phones over USB. |
 | **Tunnel / tunneld** | A helper that opens a secure channel to the iPhone over USB. It must keep running. |
