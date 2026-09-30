@@ -52,6 +52,7 @@ STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobilede
 # keyframe. It asks once; when the phone ignores that, the picture stays frozen while
 # the phone keeps streaming (so the stall watchdog never fires), and the bot acted on
 # a stale screen for 20-60 s: "touches ignored" restart loops, Next Level tapped 10x.
+REOPEN_RETRY_S = 5.0  # phone gone: try to reopen the session this often
 KEY_RETRY_S = 1.5  # frozen this long: ask for a keyframe again (and every KEY_RETRY_S)
 KEY_RESTART_S = 6.0  # still frozen: restart the stream session
 KEY_RESTART_COOLDOWN_S = 20.0
@@ -170,6 +171,10 @@ class IPhone:
             "size": None,
         }
         self._stop = threading.Event()
+        self._closing = threading.Event()  # close() called: stop waiting for the phone
+        self.cancel = threading.Event()  # the owner's stop key: stop waiting too
+        self._reopen_lock = threading.Lock()
+        self._opens = 0  # successful reopens, so waiting threads can tell one happened
         self._reader: threading.Thread | None = None
         self._head_bytes = 0
         self._aus_logged = 0
@@ -295,15 +300,44 @@ class IPhone:
         log("DIAG", f"first frame after {time.monotonic() - t0:.1f}s: {self.stats}")
 
     def close(self) -> None:
+        self._closing.set()
         self._stop.set()
         with contextlib.suppress(Exception):
             self._call(self._close(), 30)
 
     def reopen(self) -> None:
-        log("RECOVERY", "reopening the iPhone USB session")
-        with contextlib.suppress(Exception):
-            self._call(self._close(), 30)
-        self.open()
+        """Rebuild the session. If the phone is gone (the tunnel dropped for a while),
+        wait for it to come back instead of raising: a raise here killed a 16 h run.
+        One thread reopens at a time; the others wait for it and use its session."""
+        gen = self._opens
+        with self._reopen_lock:
+            if self._opens != gen and self.alive:
+                return  # another thread just reopened it
+            t0 = time.monotonic()
+            next_note = 0.0
+            while True:
+                log("RECOVERY", "reopening the iPhone USB session")
+                with contextlib.suppress(Exception):
+                    self._call(self._close(), 30)
+                try:
+                    self.open()
+                    self._opens += 1
+                    return
+                except Exception as exc:  # NoTunnel, no frames, OSError from the tunnel
+                    if self._given_up():
+                        raise
+                    waited = time.monotonic() - t0
+                    if waited >= next_note:
+                        log("WARN", f"iPhone not back yet ({waited:.0f}s): {exc}")
+                        next_note = waited + 60
+                deadline = time.monotonic() + REOPEN_RETRY_S
+                while time.monotonic() < deadline:
+                    if self._given_up():
+                        raise IPhoneError("stopped while waiting for the iPhone")
+                    time.sleep(0.25)
+
+    def _given_up(self) -> bool:
+        return self._closing.is_set() or self.cancel.is_set()
 
     @property
     def alive(self) -> bool:

@@ -720,10 +720,10 @@ class RunScreen(Screen):
             self.app.pop_screen()
             return
         self.stopping = True
-        if self.bot is None and self.app.serial.startswith("ios"):
+        if self.app.serial.startswith("ios"):
             from .ios_device import cancel_connect
 
-            cancel_connect()  # still waiting for the iPhone to show up
+            cancel_connect()  # it may be waiting for the iPhone to show up (again)
         if self.bot is not None:
             self.bot.pause_event.clear()
             self.bot.stop_event.set()

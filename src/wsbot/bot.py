@@ -18,9 +18,11 @@ that swallows the swipes under it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -411,7 +413,12 @@ class Bot:
         deadline = time.monotonic() + timeout
         hidden_since: float | None = None
         other: list[str] | None = None
-        while not self.stop_event.is_set() and time.monotonic() < deadline:
+        # A board that went away just before the deadline still gets its HIDDEN_END_S:
+        # cutting that short started the exhaustive pass on the level-complete screen.
+        grace = deadline + HIDDEN_END_S + 1.0
+        while not self.stop_event.is_set() and (
+            time.monotonic() < deadline or (hidden_since is not None and time.monotonic() < grace)
+        ):
             if self.watcher.level_done.is_set():
                 return True
             frame = self.watcher.latest(newer_than=self.watcher.frame_time, timeout=1.0)
@@ -446,70 +453,85 @@ class Bot:
         restarts_this_level = 0
         try:
             while not self.stop_event.is_set():
-                if self.goal.finished():
-                    g = self.goal
-                    if g.session_target is not None and g.session_levels >= g.session_target:
-                        log("GOAL", f"played the {g.session_target} levels asked for; stopping")
-                    else:
-                        log("GOAL", f"target reached: {g.title}")
-                    break
-                if self.goal.quota_reached_today():
-                    self._sleep_until_tomorrow()
-                    continue
-                if self.pacer and (wait := self.pacer.wait_before_start()) > 0:
-                    self._rest(wait, "waiting for today's play window")
-                    continue
+                try:
+                    if self.goal.finished():
+                        g = self.goal
+                        if g.session_target is not None and g.session_levels >= g.session_target:
+                            log("GOAL", f"played the {g.session_target} levels asked for; stopping")
+                        else:
+                            log("GOAL", f"target reached: {g.title}")
+                        break
+                    if self.goal.quota_reached_today():
+                        self._sleep_until_tomorrow()
+                        continue
+                    if self.pacer and (wait := self.pacer.wait_before_start()) > 0:
+                        self._rest(wait, "waiting for today's play window")
+                        continue
 
-                self.status = "reading board"
-                self.phase = ""
-                board, grid = self.wait_for_board(
-                    different_from=previous, timeout=self.pacing.no_board_restart_s
-                )
-                if board is None:
+                    self.status = "reading board"
+                    self.phase = ""
+                    board, grid = self.wait_for_board(
+                        different_from=previous, timeout=self.pacing.no_board_restart_s
+                    )
+                    if board is None:
+                        if self.stop_event.is_set():
+                            break
+                        self._dump("no_board")
+                        self.restart_app("no board for a long time")
+                        previous = None
+                        continue
+
+                    self.watcher.level_done.clear()
+                    self.watcher.expected_panel = board.panel
+                    self.device.below_board_y = board.panel[1] + board.panel[3] + 5
+                    self.device.last_panel = board.panel
+                    snap("level_start", self.watcher.frame, every_s=0, note=f"{board.panel} {grid}")
+                    dbg(
+                        f"board panel={board.panel} {board.rows}x{board.cols} "
+                        f"letter_h={board.letter_h:.1f} calib={self.device.calib} "
+                        f"zones={getattr(self.device, 'zones', None)}"
+                    )
+                    self.grid, self.fired_cells, self.found_cells = grid, set(), set()
+                    self.level_started = t0 = time.monotonic()
+                    n = self.goal.done_total + 1
+                    log("LEVEL", f"#{n} {board.rows}x{board.cols} {'/'.join(grid)}")
+                    self.status = "solving"
+                    finished = self.solve_level(board, grid)
+                    self.watcher.expected_panel = None
+                    self.device.below_board_y = None
                     if self.stop_event.is_set():
                         break
-                    self._dump("no_board")
-                    self.restart_app("no board for a long time")
+                    if not finished:
+                        restarts_this_level += 1
+                        # Swipes into a board that ignored touches never counted: fire them
+                        # again.
+                        self._forget_swiped(
+                            everything=restarts_this_level >= 3 or self._input_blocked
+                        )
+                        self._dump("level_stuck")
+                        self.restart_app(
+                            f"level stuck after every pass (try {restarts_this_level})"
+                        )
+                        previous = None  # the same level comes back after a restart
+                        continue
+
+                    restarts_this_level = 0
+                    dt = time.monotonic() - t0
+                    self.stats.levels += 1
+                    self.stats.level_times.append(dt)
+                    self.goal.record_level()
+                    log("LEVEL", f"#{n} done in {dt:.1f}s · today {self.goal.done_today}")
+                    previous = grid
+                    self._pace(dt)
+                except Exception as exc:  # a 10-day run must outlive any one failure
+                    if self.stop_event.is_set():
+                        break
+                    log("ERROR", f"{type(exc).__name__}: {exc}; restarting the game")
+                    dbg(f"main loop error: {traceback.format_exc()}")
+                    self.stop_event.wait(10)
+                    with contextlib.suppress(Exception):
+                        self.restart_app("recovering from an error")
                     previous = None
-                    continue
-
-                self.watcher.level_done.clear()
-                self.watcher.expected_panel = board.panel
-                self.device.below_board_y = board.panel[1] + board.panel[3] + 5
-                self.device.last_panel = board.panel
-                snap("level_start", self.watcher.frame, every_s=0, note=f"{board.panel} {grid}")
-                dbg(
-                    f"board panel={board.panel} {board.rows}x{board.cols} "
-                    f"letter_h={board.letter_h:.1f} calib={self.device.calib} "
-                    f"zones={getattr(self.device, 'zones', None)}"
-                )
-                self.grid, self.fired_cells, self.found_cells = grid, set(), set()
-                self.level_started = t0 = time.monotonic()
-                n = self.goal.done_total + 1
-                log("LEVEL", f"#{n} {board.rows}x{board.cols} {'/'.join(grid)}")
-                self.status = "solving"
-                finished = self.solve_level(board, grid)
-                self.watcher.expected_panel = None
-                self.device.below_board_y = None
-                if self.stop_event.is_set():
-                    break
-                if not finished:
-                    restarts_this_level += 1
-                    # Swipes into a board that ignored touches never counted: fire them again.
-                    self._forget_swiped(everything=restarts_this_level >= 3 or self._input_blocked)
-                    self._dump("level_stuck")
-                    self.restart_app(f"level stuck after every pass (try {restarts_this_level})")
-                    previous = None  # the same level comes back after a restart
-                    continue
-
-                restarts_this_level = 0
-                dt = time.monotonic() - t0
-                self.stats.levels += 1
-                self.stats.level_times.append(dt)
-                self.goal.record_level()
-                log("LEVEL", f"#{n} done in {dt:.1f}s · today {self.goal.done_today}")
-                previous = grid
-                self._pace(dt)
         finally:
             # Stop the watcher before the device closes, or its next tick sees the phone
             # gone and tries to reconnect it.

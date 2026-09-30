@@ -87,7 +87,7 @@ IPHONE_NAMES = {
 
 
 def cancel_connect() -> None:
-    """Abort a connect that is waiting for the phone (the UI's stop key)."""
+    """Abort a connect or reopen that is waiting for the phone (the UI's stop key)."""
     _stop_waiting.set()
 
 
@@ -127,6 +127,7 @@ class IOSGameDevice(BaseDevice):
         from .iphone import IPhone
 
         self.phone = IPhone(udid)
+        self.phone.cancel = _stop_waiting  # the UI's stop key also ends a wait in reopen()
         self._open_phone()
         self.serial = f"ios:{self.phone.udid}"
         self.dry_run = dry_run
