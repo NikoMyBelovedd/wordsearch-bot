@@ -5,11 +5,14 @@ and owns every screenshot; this thread only reads its frames and swipes.
 
 Solving escalates through passes until the level ends:
   1. fast        every dictionary word once (best-ranked path), back to back
-  2. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
+  2. retry       the common dictionary words still unlit, once more with a breath
+                 between swipes: the iPhone game drops some back-to-back swipes, and
+                 the exhaustive pass reaches short ones (MILK, OIL) only at its end
+  3. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
                  yet: finds words the dictionary doesn't know (ORANGUTAN)
-  3. repeat      last resort: every path of every word not yet highlighted, even
+  4. repeat      last resort: every path of every word not yet highlighted, even
                  ones already swiped
-  4. restart     relaunch the app and start the level over
+  5. restart     relaunch the app and start the level over
 
 A word is swiped once per level before the repeat pass: re-swiping one the game has
 already taken (a bonus word) pops an "already collected" toast over the bottom rows
@@ -27,6 +30,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
+import numpy as np
+
 from .board import Board, highlighted, read_board
 from .debug import dbg, snap
 from .device import open_device
@@ -43,6 +49,8 @@ MAX_DIAGNOSTICS = 150  # newest dumps kept; a 10-day run must not fill the disk
 HIDDEN_END_S = 1.5  # board gone this long after a pass = the level is over
 STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finished
 PROGRESS_CHECK_EVERY = 300  # exhaustive swipes between "is anything still being found?"
+HUNG_S = 40.0  # board gone and not one pixel changed this long despite clear taps: hung
+RETRY_RANK = 20_000  # retry pass: dictionary words this common (MILK, OIL, CHARGER 4,635)
 
 
 class InputBlocked(Exception):
@@ -55,6 +63,7 @@ class Pacing:
     gap_s: float = 0.0  # pause after each swipe; the game never blocks input on a find
     refire_swipe_ms: int = 120  # later passes go slower, in case speed caused a miss
     refire_gap_s: float = 0.1
+    retry_gap_s: float = 0.1  # retry pass: a breath between swipes lets the game take each
     settle_s: float = 0.3  # pause after a popup clears before swiping again
     clear_tap_s: float = 2.5  # board hidden this long with no known popup -> clear tap
     level_end_s: float = 2.5  # how long to wait for the level to end after a pass
@@ -132,6 +141,7 @@ class Bot:
         last_time, prev = 0.0, None
         hidden_since = last_clear = last_report = start
         stale_since: float | None = None
+        still, still_since = None, start  # the game froze once with letters mid-flight
         why = "no frame yet"
         while not self.stop_event.is_set() and time.monotonic() < deadline:
             now = time.monotonic()
@@ -145,6 +155,12 @@ class Bot:
             last_time = self.watcher.frame_time
             board = read_board(frame)
             now = time.monotonic()
+            thumb = cv2.resize(frame, (27, 48), interpolation=cv2.INTER_AREA).astype(np.int16)
+            if board is not None or still is None or np.abs(thumb - still).mean() > 1.0:
+                still, still_since = thumb, now
+            elif now - still_since >= HUNG_S:
+                log("WARN", f"the screen hasn't changed for {HUNG_S:.0f}s despite taps: game hung")
+                return None, None
             if board is not None:
                 hidden_since = now
             elif self._should_clear_tap(now, hidden_since, last_clear):
@@ -277,9 +293,12 @@ class Bot:
             done = set(self.swiped)  # snapshot: repeated non-words within a pass are fine
             return [h for h in todo if h.word not in done]
 
+        common = [h for h in fast if h.rank < RETRY_RANK]
         p = self.pacing
         passes = [
             ("fast", lambda: new(self._unlit(board, fast)), p.swipe_ms, p.gap_s, 0),
+            # not filtered by new(): these are the swiped words the game didn't take
+            ("retry", lambda: self._unlit(board, common), p.swipe_ms, p.retry_gap_s, 0),
             (
                 "exhaustive",
                 lambda: new(self._unlit(board, all_lines(grid), most_unlit_first=True)),
@@ -294,6 +313,8 @@ class Bot:
         try:
             for name, pick, ms, gap, check_every in passes:
                 todo = pick()
+                if not todo and name == "retry":
+                    continue
                 self.phase = f"{name} ({len(todo)})"
                 if name != "fast":
                     log("PASS", f"{name}: {len(todo)} swipes")
