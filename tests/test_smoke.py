@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 
 import cv2
@@ -52,3 +53,27 @@ def test_reference_letters_read_themselves(tmp_path: Path):
         if glyph is None:
             continue
         assert reader.ranked(normalize(glyph))[0][1] == letter
+
+
+def test_spread_keeps_every_swipe_and_separates_overlaps():
+    from wsbot.bot import all_lines, path_cells, spread
+
+    grid = ["EKIBROTOM", "UNMTRAMHZ", "PVJTRUCKN"]
+    lines = all_lines(grid)
+    out = spread(lines)
+    assert sorted(out) == sorted(lines)
+    first = [h.word for h in out[:4]]
+    assert not ({"EKIBROTOM", "MOTORBIKE"} <= set(first[:2]))
+    pairs = list(pairwise(out))
+    clashes = sum(bool(set(path_cells(a)) & set(path_cells(b))) for a, b in pairs)
+    assert clashes < len(pairs) // 10
+
+
+def test_learning_needs_a_whole_lit_run():
+    from wsbot.bot import _whole_run
+    from wsbot.solver import Hit
+
+    lit = {(0, c) for c in range(3, 8)}  # LMOAR lit, MOAR is a piece of it
+    assert not _whole_run(Hit(0, "MOAR", (0, 4), (0, 7)), lit)
+    assert _whole_run(Hit(0, "LMOAR", (0, 3), (0, 7)), lit)
+    assert _whole_run(Hit(0, "RAOML", (0, 7), (0, 3)), lit)

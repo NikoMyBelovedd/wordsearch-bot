@@ -10,9 +10,11 @@ Solving escalates through passes until the level ends:
                  the exhaustive pass reaches short ones (MILK, OIL) only at its end
   3. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
                  yet: finds words the dictionary doesn't know (ORANGUTAN)
-  4. repeat      last resort: every path of every word not yet highlighted, even
+  4. slow        lines outside the dictionary on unlit cells, once more, slowly: the
+                 game drops a swipe now and then, and the exhaustive pass has one shot
+  5. repeat      last resort: every path of every word not yet highlighted, even
                  ones already swiped
-  5. restart     relaunch the app and start the level over
+  6. restart     relaunch the app and start the level over
 
 A word is swiped once per level before the repeat pass: re-swiping one the game has
 already taken (a bonus word) pops an "already collected" toast over the bottom rows
@@ -51,6 +53,16 @@ STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finis
 PROGRESS_CHECK_EVERY = 300  # exhaustive swipes between "is anything still being found?"
 HUNG_S = 40.0  # board gone and not one pixel changed this long despite clear taps: hung
 RETRY_RANK = 20_000  # retry pass: dictionary words this common (MILK, OIL, CHARGER 4,635)
+# Swipes fired this long before the toast was first seen landed under it (the eye sees
+# it ~50 ms late). Wider re-fired swipes from just before it showed: taken bonus words,
+# whose re-swipe popped another toast, in a cascade (the retry pass took 32 s).
+TOAST_EATS_S = 0.1
+# Swipes fired this long before the bot had to hold for a popup may have been eaten:
+# the watcher's ~0.45 s tick plus the popup fading in.
+POPUP_EATS_S = 0.75
+LEARN_PASSES = ("exhaustive", "slow")
+LEARN_MIN_LEN = 4
+LEARNED_RANK = 1_000  # learned theme words go early in the fast pass
 
 
 class InputBlocked(Exception):
@@ -91,6 +103,9 @@ class Bot:
         self.diagnostics.mkdir(exist_ok=True)
         self.letters = LetterReader(root / "templates" / "letters")
         self.words = Dictionary(root / "data" / "words.txt")
+        self._learned_path = root / "local" / "learned-words.txt"
+        self._load_learned()
+        self.pass_fired: list[Hit] = []
         templates = root / self.device.templates
         self.watcher = PopupWatcher(self.device, templates, PACKAGE, self.diagnostics)
         self.pacing = Pacing(swipe_ms=self.device.swipe_ms)
@@ -108,6 +123,8 @@ class Bot:
         self.level_started = 0.0
         self.board_center = self.device.board_center  # middle of the board; updated each level
         self.clear_taps = 0
+        self.held_at: float | None = None  # see _ready_to_swipe
+        self.maybe_eaten: set[Hit] = set()
         self._input_blocked = False
         # Words swiped on the current level, saved so a bot restart mid-level doesn't
         # re-swipe them (each re-swipe of a taken word pops a toast).
@@ -202,6 +219,8 @@ class Bot:
     # device.above_board).
 
     def _clear_tap(self) -> None:
+        if getattr(self.device, "game_missing", lambda: False)():
+            return  # on the home screen a blind tap opens apps; the watcher relaunches
         if self.clear_taps % 2 == 0:
             self.device.tap(*self.board_center, why="clear popup (board center)")
         else:
@@ -219,7 +238,10 @@ class Bot:
     # ---- burst ---------------------------------------------------------------
 
     def _ready_to_swipe(self, grid: list[str]) -> bool:
-        """Hold while a popup or pause is up. False means the level is over."""
+        """Hold while a popup or pause is up. False means the level is over.
+
+        held_at: when this call started holding for a popup (None = it didn't)."""
+        self.held_at = None
         while not self.stop_event.is_set():
             if self.pause_event.is_set():
                 self.status = "paused"
@@ -232,6 +254,7 @@ class Bot:
                 return True
             # Board hidden: a popup, or the level is finishing. Wait it out, then
             # make sure it's still the same board before swiping again.
+            self.held_at = self.held_at or time.monotonic()
             self.status = "waiting for popup"
             t0 = time.monotonic()
             _, new_grid = self.wait_for_board(timeout=20)
@@ -259,15 +282,48 @@ class Bot:
     ) -> bool:
         """Swipe every hit in order. True if all were fired without the level ending.
 
-        No refiring here: most swipes near a popup did land, and re-swiping a word the
-        game already took pops a toast. A swipe a popup really ate is caught by the
+        No refiring after popups: most swipes near one did land, and re-swiping a word
+        the game already took pops a toast. A swipe a popup really ate is caught by the
         repeat pass.
+
+        The "already collected" toast is the exception, because it eats every swipe on
+        the rows under it for ~1.5 s (MOTORBIKE, on the bottom row, was lost that way):
+        while it's up, swipes there wait at the back of the line, and the ones fired
+        there in the moment before the bot saw it are fired again, once.
         """
-        for i, hit in enumerate(hits):
-            if check_every and i and i % check_every == 0:
-                self._check_input(board, self._lit_cells(board))
+        todo = deque(hits)
+        later: list[Hit] = []  # waiting for the toast to go
+        fired: deque[tuple[float, Hit]] = deque(maxlen=40)
+        refired: set[Hit] = set()
+        cover_handled = self.watcher.cover_since
+        n = 0
+        while todo or later:
+            if not todo:  # only swipes under the toast are left: wait it out
+                self._wait_uncovered()
+                todo.extend(later)
+                later.clear()
+            hit = todo.popleft()
             if not self._ready_to_swipe(grid):
                 return False
+            if self.held_at:
+                # The popup was fading in before the watcher (~2 fps) saw it: the swipes
+                # fired just before may have been eaten (PERFUME, EARRING under "claim
+                # bonus"). The retry pass fires them again if they're still unlit; firing
+                # them right away re-swiped taken bonus words into a cascade of toasts.
+                self.maybe_eaten.update(h for t, h in fired if t >= self.held_at - POPUP_EATS_S)
+            span = self.watcher.covering()
+            if span and _under(board, hit, span):
+                later.append(hit)
+                continue
+            if later and not span:
+                todo.appendleft(hit)
+                todo.extendleft(reversed(later))
+                later.clear()
+                continue
+            if check_every and n and n % check_every == 0:
+                self._check_input(board, self._lit_cells(board))
+            n += 1
+            t = time.monotonic()
             ok = self.device.swipe(
                 board.cell(*hit.start).center, board.cell(*hit.end).center, ms, why=hit.word
             )
@@ -275,9 +331,30 @@ class Bot:
                 self.stats.swipes += 1
                 self.fired_cells.update(path_cells(hit))
                 self.swiped.add(hit.word)
+                fired.append((t, hit))
+                self.pass_fired.append(hit)
+            since = self.watcher.cover_since
+            if since != cover_handled:
+                cover_handled = since
+                span = self.watcher.cover_span
+                eaten = [
+                    h
+                    for t, h in fired
+                    if t >= since - TOAST_EATS_S and h not in refired and _under(board, h, span)
+                ]
+                if eaten:
+                    refired.update(eaten)
+                    later.extend(eaten)
+                    log("PAUSE", f"toast over the board; will re-swipe {len(eaten)} under it")
             if gap:
                 time.sleep(gap)
         return True
+
+    def _wait_uncovered(self, timeout: float = 4.0) -> None:
+        deadline = time.monotonic() + timeout
+        while self.watcher.covering() and time.monotonic() < deadline:
+            if self.stop_event.wait(0.05):
+                return
 
     # ---- level solving ---------------------------------------------------------
 
@@ -286,6 +363,12 @@ class Bot:
         hits = self.words.solve(grid)
         seen: set[str] = set()
         fast = [h for h in hits if not (h.word in seen or seen.add(h.word))]
+        # Words lying inside a longer one go last. The game ignores a swipe on cells it
+        # is still animating from a word it just took, for about a second, and those
+        # sub-words are bonus words it takes: ART fired before ARTICLE ate ARTICLE twice
+        # (ADA -> CICADA, ORC -> ORCHARD, REG -> CHARGER). Not longest-first overall:
+        # theme words back to back lost DRAGONFLY and WHEAT.
+        fast = _subwords_last(fast)
         if self._swiped_grid is None or not same_level(grid, self._swiped_grid):
             self.swiped, self._swiped_grid = set(), grid  # kept across restarts of a level
 
@@ -293,12 +376,22 @@ class Bot:
             done = set(self.swiped)  # snapshot: repeated non-words within a pass are fine
             return [h for h in todo if h.word not in done]
 
+        self.maybe_eaten: set[Hit] = set()  # fired just before a popup (see burst)
         common = [h for h in fast if h.rank < RETRY_RANK]
+
+        def retry() -> list[Hit]:
+            # Re-swiping taken bonus words pops toasts over the bottom rows: fire the
+            # words there first, before the first toast can hold them up.
+            first = sorted(self.maybe_eaten)
+            todo = self._unlit(board, first + [h for h in common if h not in self.maybe_eaten])
+            low = board.rows - 2
+            return sorted(_subwords_last(todo), key=lambda h: max(h.start[0], h.end[0]) < low)
+
         p = self.pacing
         passes = [
             ("fast", lambda: new(self._unlit(board, fast)), p.swipe_ms, p.gap_s, 0),
             # not filtered by new(): these are the swiped words the game didn't take
-            ("retry", lambda: self._unlit(board, common), p.swipe_ms, p.retry_gap_s, 0),
+            ("retry", retry, p.swipe_ms, p.retry_gap_s, 0),
             (
                 "exhaustive",
                 lambda: new(self._unlit(board, all_lines(grid), most_unlit_first=True)),
@@ -306,6 +399,9 @@ class Bot:
                 p.gap_s,
                 PROGRESS_CHECK_EVERY,
             ),
+            # not filtered by new(): a theme word the dictionary lacks gets one shot in
+            # the exhaustive pass, and MOTORBIKE was dropped there on 3 tries in a row
+            ("slow", lambda: self._open_lines(board, grid), p.refire_swipe_ms, p.refire_gap_s, 0),
             ("repeat", lambda: self._unlit(board, hits), p.refire_swipe_ms, p.refire_gap_s, 0),
         ]
         self._checked_lit = set()
@@ -313,22 +409,128 @@ class Bot:
         try:
             for name, pick, ms, gap, check_every in passes:
                 todo = pick()
-                if not todo and name == "retry":
+                if not todo and name in ("retry", "slow"):
                     continue
                 self.phase = f"{name} ({len(todo)})"
                 if name != "fast":
                     log("PASS", f"{name}: {len(todo)} swipes")
                     self._check_input(board, self.found_cells)
-                finished = not self.burst(board, grid, todo, ms, gap, check_every)
+                lit_before = set(self.found_cells) if name in LEARN_PASSES else None
+                self.pass_fired = []
+                finished = not self.burst(board, grid, spread(todo), ms, gap, check_every)
                 self._save_swiped()
-                if finished:
-                    return True
-                if self._wait_level_end(grid, timeout=p.level_end_s):
+                over = finished or self._wait_level_end(grid, timeout=p.level_end_s)
+                if lit_before is not None:
+                    self._learn(board, lit_before, over)
+                if over:
                     return True
         except InputBlocked:
             self._dump("input_blocked")
             log("WARN", "the game ignores touches on the board; restarting")
             self._input_blocked = True
+        return False
+
+    # ---- learning theme words the wordlist lacks -------------------------------
+
+    def _load_learned(self) -> None:
+        try:
+            words = self._learned_path.read_text(encoding="utf-8").split()
+        except OSError:
+            return
+        for w in words:
+            if w not in self.words.rank:
+                self.words.add(w, LEARNED_RANK)
+        log("WORDS", f"{len(words)} learned theme words")
+
+    def _learn(self, board: Board, lit_before: set[tuple[int, int]], over: bool) -> None:
+        """Remember the lines outside the wordlist that this pass found, so the fast pass
+        gets them next time (MOTORBIKE came back on 3 days, each time costing a full
+        exhaustive pass). Found = every cell of the line lit up during the pass. The pill
+        doesn't show a direction, so a line and its reverse are both learned."""
+        if over:
+            # The level's last frames with the board up. The very last can be mid-
+            # animation (letters flying off read as unlit: "48 -> 6 lit"), and lit cells
+            # only grow during a level, so take the one with the most.
+            lit = max(
+                (
+                    {
+                        (r, c)
+                        for r in range(board.rows)
+                        for c in range(board.cols)
+                        if highlighted(frame, board, r, c)
+                    }
+                    for frame in list(self.watcher.board_frames)
+                ),
+                key=len,
+                default=None,
+            )
+            if lit is None:
+                return
+        else:
+            lit = self._lit_cells(board)
+            if lit is None:
+                return
+        fresh = lit - lit_before
+        g = self.grid
+        dbg(
+            f"learn: over={over} lit {len(lit_before)}->{len(lit)}, new cells "
+            f"{' '.join(f'{g[r][c]}{r},{c}' for r, c in sorted(fresh))}"
+        )
+        # A found word lights exactly its own cells, so the line must cover a whole lit
+        # run: a piece of a longer find (MOAR inside a found row) has lit cells beyond an
+        # end. And it must not be a known word (either way round: PMET = TEMP) plus one
+        # cell another find lit (ELANDING = LANDING + the E of STEP's row).
+        keep = [
+            h
+            for h in self.pass_fired
+            if len(h.word) >= LEARN_MIN_LEN
+            and not self._known_inside(h.word)
+            and not self._known_outside(h)
+            and set(path_cells(h)) <= lit
+            and sum(c not in fresh for c in path_cells(h)) <= 2
+            and _whole_run(h, fresh)
+        ]
+        # Up to 2 cells may have been lit before: theme words cross found ones
+        # (PORCUPINE's E was BULLET's). Then the line minus that end qualifies too
+        # (PORCUPIN): both get learned; a stray one costs a swipe on boards that have it.
+        words = sorted({h.word for h in keep})
+        if not words or len(words) > 8:
+            return
+        # Most of what lit up must be these lines: a level-end flash or a misread frame
+        # lights cells everywhere, and learning from that would teach junk.
+        covered = {c for h in keep for c in path_cells(h)}
+        if len(fresh) > 2 * len(covered):
+            dbg(f"learn: skipped {words}: {len(fresh)} cells lit vs {len(covered)}")
+            return
+        for w in words:
+            self.words.add(w, LEARNED_RANK)
+        try:
+            self._learned_path.parent.mkdir(exist_ok=True)
+            with self._learned_path.open("a", encoding="utf-8") as f:
+                f.write("".join(w + "\n" for w in words))
+        except OSError as exc:
+            log("WARN", f"couldn't save learned words: {exc!r}")
+        log("WORDS", f"learned {', '.join(words)}")
+
+    def _known_inside(self, word: str) -> bool:
+        rank = self.words.rank
+        return any(v in rank for w in (word, word[::-1]) for v in (w, w[1:], w[:-1]))
+
+    def _known_outside(self, hit: Hit) -> bool:
+        """The line one cell longer at either end is a known word (DRAGONFL: the Y of
+        DRAGONFLY was lit before, by a crossing word)."""
+        cells = path_cells(hit)
+        (r0, c0), (r1, c1) = cells[0], cells[-1]
+        dr, dc = (r1 - r0) // (len(cells) - 1), (c1 - c0) // (len(cells) - 1)
+        g, rows, cols = self.grid, len(self.grid), len(self.grid[0])
+        for r, c, w in (
+            (r0 - dr, c0 - dc, lambda x: x + hit.word),
+            (r1 + dr, c1 + dc, lambda x: hit.word + x),
+        ):
+            if 0 <= r < rows and 0 <= c < cols:
+                longer = w(g[r][c])
+                if longer in self.words.rank or longer[::-1] in self.words.rank:
+                    return True
         return False
 
     def _check_input(self, board: Board, lit: set[tuple[int, int]] | None) -> None:
@@ -423,6 +625,20 @@ class Bot:
             todo.sort(key=lambda h: (-sum(c not in lit for c in path_cells(h)), -len(h.word)))
         return todo
 
+    def _open_lines(self, board: Board, grid: list[str]) -> list[Hit]:
+        """Lines of 4+ letters outside the dictionary lying on unlit cells (one lit cell
+        allowed: a theme word may cross a found one), untouched ones first, longest first."""
+        lit = self._lit_cells(board)
+        if lit is None:
+            return []
+        self.found_cells = lit
+        out = []
+        for h in all_lines(grid):
+            n_lit = sum(c in lit for c in path_cells(h))
+            if len(h.word) >= 4 and n_lit <= 1 and h.word not in self.words.rank:
+                out.append((n_lit, -len(h.word), h))
+        return [h for *_, h in sorted(out)]
+
     def _wait_level_end(self, grid: list[str], timeout: float) -> bool:
         """True once the level has really ended.
 
@@ -447,6 +663,11 @@ class Bot:
                 continue
             now = time.monotonic()
             board = read_board(frame)
+            if board is None and self.watcher.covering():
+                # The "already collected" toast cuts the board short for ~1.5 s: that
+                # counted fake "level done"s, then "the previous level is still on screen".
+                hidden_since = None
+                continue
             if board is None:
                 hidden_since = hidden_since or now
                 if now - hidden_since >= HIDDEN_END_S:
@@ -663,6 +884,54 @@ def same_level(a: list[str], b: list[str]) -> bool:
         return True
     pairs = [(x, y) for ra, rb in zip(a, b, strict=False) for x, y in zip(ra, rb, strict=False)]
     return bool(pairs) and sum(x == y for x, y in pairs) >= 0.6 * len(pairs)
+
+
+def _under(board: Board, hit: Hit, span: tuple[int, int]) -> bool:
+    """True if any cell of the swipe lies in the y range a toast covers."""
+    y0, y1 = span
+    return any(y0 <= board.cell(*c).center[1] <= y1 for c in path_cells(hit))
+
+
+def spread(hits: list[Hit], recent: int = 3, window: int = 24) -> list[Hit]:
+    """Same swipes, reordered so none shares a cell with the last `recent` ones.
+
+    Rare words sit in the wordlist alphabetically, so a word used to fire right after
+    its own prefix on the same cells (ORC -> ORCHARD, BAH -> BAHT), and the exhaustive
+    pass fires a line right after its reverse (EKIBROTOM -> MOTORBIKE). The game drops
+    some swipes that land on cells it is still animating from the swipe before. Looks
+    only `window` ahead, so the order stays close to best-first.
+    """
+    todo = list(hits)
+    out: list[Hit] = []
+    busy: deque[set[tuple[int, int]]] = deque(maxlen=recent)
+    while todo:
+        pick = 0
+        for i, h in enumerate(todo[:window]):
+            cells = set(path_cells(h))
+            if not any(cells & b for b in busy):
+                pick = i
+                break
+        h = todo.pop(pick)
+        out.append(h)
+        busy.append(set(path_cells(h)))
+    return out
+
+
+def _subwords_last(hits: list[Hit]) -> list[Hit]:
+    """Same order, except hits whose cells all lie inside another hit's go to the end."""
+    cells = [set(path_cells(h)) for h in hits]
+    inside = [any(c < o for o in cells) for c in cells]
+    return [h for h, i in zip(hits, inside, strict=True) if not i] + [
+        h for h, i in zip(hits, inside, strict=True) if i
+    ]
+
+
+def _whole_run(hit: Hit, lit: set[tuple[int, int]]) -> bool:
+    """The cells just before the start and just past the end (along the line) are unlit."""
+    cells = path_cells(hit)
+    (r0, c0), (r1, c1) = cells[0], cells[-1]
+    dr, dc = (r1 - r0) // (len(cells) - 1), (c1 - c0) // (len(cells) - 1)
+    return (r0 - dr, c0 - dc) not in lit and (r1 + dr, c1 + dc) not in lit
 
 
 def path_cells(hit: Hit) -> list[tuple[int, int]]:

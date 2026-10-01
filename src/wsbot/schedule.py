@@ -66,9 +66,24 @@ def load_custom(path: Path) -> Schedule:
         return Schedule()
 
 
-def save_custom(path: Path, schedule: Schedule) -> None:
+def load_settings(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_setting(path: Path, key: str, value) -> None:
+    """Set one key of settings.json, keeping the others."""
+    data = load_settings(path)
+    data[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"custom": asdict(schedule)}, indent=1), encoding="utf-8")
+    path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+
+
+def save_custom(path: Path, schedule: Schedule) -> None:
+    save_setting(path, "custom", asdict(schedule))
 
 
 def _at_hour(day: dt.date, hour: float) -> float:

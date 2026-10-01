@@ -124,7 +124,9 @@
     "file": "already_collected.png",
     "threshold": 0.85,
     "cooldown": 1.0,
-    "blocking": false
+    "blocking": false,
+    "covers": [-140, 140],
+    "tap": false
   },
   {
     "name": "play_later",

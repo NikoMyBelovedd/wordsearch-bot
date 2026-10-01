@@ -17,7 +17,19 @@ Sink = Callable[[str, str, str], None]  # (timestamp, tag, message)
 # action tags (LEVEL, SWIPE, TAP, PACE, SAFETY, RECOVERY). Minor tags fold into [LOG]
 # with their old name as a prefix, so nothing is lost.
 ALIASES = {"WATCHER": "POPUP-WATCHER", "WARN": "WARNING"}
-GENERAL = {"DEVICE", "LETTERS", "APP", "WAIT", "PAUSE", "DIAG", "OCR", "GOAL", "PASS", "PROBE"}
+GENERAL = {
+    "DEVICE",
+    "LETTERS",
+    "APP",
+    "WAIT",
+    "PAUSE",
+    "DIAG",
+    "OCR",
+    "GOAL",
+    "PASS",
+    "PROBE",
+    "WORDS",
+}
 
 _sinks: list[Sink] = []
 _sticky: list[Sink] = []  # survive set_sinks (DEVTEST debug.log mirror)

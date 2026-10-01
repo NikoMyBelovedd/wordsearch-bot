@@ -29,9 +29,12 @@ class Dictionary:
             w = line.strip().upper()
             if len(w) < MIN_LEN or not w.isalpha() or w in self.rank:
                 continue
-            self.rank[w] = i
-            for k in range(1, len(w)):
-                self.prefixes.add(w[:k])
+            self.add(w, i)
+
+    def add(self, word: str, rank: int) -> None:
+        self.rank[word] = rank
+        for k in range(1, len(word)):
+            self.prefixes.add(word[:k])
 
     def solve(self, grid: list[str]) -> list[Hit]:
         """Every dictionary word along straight lines, best-ranked first.

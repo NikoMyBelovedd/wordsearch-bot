@@ -280,6 +280,17 @@ class IOSGameDevice(BaseDevice):
                     log("ERROR", f"top bar search failed: {exc!r}")
         return cv2.resize(img, self.calib, interpolation=cv2.INTER_LINEAR)
 
+    def peek(self, box: tuple[int, int, int, int], scale: float) -> tuple[np.ndarray, float]:
+        """Part of the newest frame (calib box x0,y0,x1,y1) at `scale`, and when it
+        arrived. A few ms, any thread: frames are already in memory here."""
+        _, t, img = self.phone.latest()
+        h, w = img.shape[:2]
+        sx, sy = w / self.calib[0], h / self.calib[1]
+        x0, y0, x1, y1 = box
+        crop = img[round(y0 * sy) : round(y1 * sy), round(x0 * sx) : round(x1 * sx)]
+        size = (round((x1 - x0) * scale), round((y1 - y0) * scale))
+        return cv2.resize(crop, size, interpolation=cv2.INTER_AREA), t
+
     def view_stale(self) -> bool:
         return self.phone.frozen
 
@@ -308,6 +319,11 @@ class IOSGameDevice(BaseDevice):
         # relaunch kills the running copy: only believe it three checks in a row.
         self._not_running = 0 if running else self._not_running + 1
         return "com.apple.springboard" if self._not_running >= 3 else GAME
+
+    def game_missing(self) -> bool:
+        """The last check found the game not running (it crashes now and then): taps
+        now land on the home screen and can open other apps."""
+        return self._not_running > 0
 
     def app_start(self, package: str) -> None:
         log("APP", f"launch {package} -> pid {self._app('launch', package)}")

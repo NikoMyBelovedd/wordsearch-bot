@@ -38,7 +38,14 @@ from .goal import (
     local_file,
 )
 from .log import file_sink, set_sinks, stdout_sink
-from .schedule import PLAY_SCHEDULE, Schedule, load_custom, save_custom
+from .schedule import (
+    PLAY_SCHEDULE,
+    Schedule,
+    load_custom,
+    load_settings,
+    save_custom,
+    save_setting,
+)
 
 DIM = "#8a8a93"
 POINTER = " \u203a "  # the row cursor
@@ -348,10 +355,18 @@ def _schedule_text(s: Schedule) -> Text:
     return t
 
 
+STOP_ROW = 3  # the mode screen's "stop after N levels" row
+STOP_MAX = 5000
+
+
 class ModeScreen(Screen):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move(-1)", "Up", show=False),
         Binding("down", "move(1)", "Down", show=False),
+        Binding("left", "adjust(-1)", MINUS, show=False),
+        Binding("right", "adjust(1)", "+", show=False),
+        Binding("shift+left", "adjust(-10)", f"{MINUS}10", show=False),
+        Binding("shift+right", "adjust(10)", "+10", show=False),
         Binding("enter", "choose", "Select / Play"),
         Binding("escape", "back", "Devices"),
         Binding("q", "app.quit", "Quit"),
@@ -359,7 +374,7 @@ class ModeScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
-        self.cursor = 0  # rows 0..2 are modes, 3 is the PLAY button
+        self.cursor = 0  # rows 0..2 are modes, 3 is "stop after", 4 is the PLAY button
         self.mode = "play"
 
     def compose(self) -> ComposeResult:
@@ -384,17 +399,23 @@ class ModeScreen(Screen):
         self.query_one("#banner", Static).update(banner(self.size.width, self.size.height - 22))
 
     def action_move(self, step: int) -> None:
-        self.cursor = max(0, min(3, self.cursor + step))
+        self.cursor = max(0, min(STOP_ROW + 1, self.cursor + step))
         self.render_all()
+
+    def action_adjust(self, steps: int) -> None:
+        if self.cursor == STOP_ROW:
+            self.app.save_stop_after(max(0, min(STOP_MAX, self.app.stop_after() + steps)))
+            self.render_all()
 
     def action_choose(self) -> None:
         if self.cursor == 2:
             self.mode = "custom"
             self.app.push_screen(CustomScreen())
             return
-        if self.cursor < 3:
-            self.mode = MODES[self.cursor]
-            self.cursor = 3
+        if self.cursor <= STOP_ROW:
+            if self.cursor < STOP_ROW:
+                self.mode = MODES[self.cursor]
+            self.cursor = STOP_ROW + 1
             self.render_all()
             return
         progress = self.app.progress()
@@ -403,7 +424,7 @@ class ModeScreen(Screen):
             "custom": lambda: Goal.custom(progress, self.app.custom_schedule()),
             "single": lambda: Goal.single(progress),
         }[self.mode]()
-        self.app.push_screen(RunScreen(goal))
+        self.app.run_goal(goal)
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -445,16 +466,26 @@ class ModeScreen(Screen):
                 "day · idles between levels to stay on pace",
                 style=DIM,
             )
+        n, here = self.app.stop_after(), self.cursor == STOP_ROW
+        bg = f" on {CURSOR_BG}" if here else ""
+        arrow = f"bold {ORANGE}" if here else DIM
+        body.append("\n\n")
+        body.append(POINTER if here else "   ", style=f"bold {ORANGE}{bg}")
+        body.append(f"  {'STOP AFTER':<14}", style=f"bold {WHITE}{bg}")
+        body.append("◀ ", style=f"{arrow if n > 0 else '#2e2e36'}{bg}")
+        body.append(f"{f'{n:,} levels' if n else 'no limit':^14}", style=f"bold {ORANGE}{bg}")
+        body.append(" ▶", style=f"{arrow if n < STOP_MAX else '#2e2e36'}{bg}")
+        body.append("   0 = no limit · shift ±10  ", style=f"{DIM}{bg}")
         self.query_one("#modes", Static).update(body)
 
-        on_play = self.cursor == 3
+        on_play = self.cursor == STOP_ROW + 1
         button = Text(justify="center")
         label = f"   ▶  PLAY  ·  {self._goal_summary()}   "
         style = f"bold #0d0d10 on {ORANGE}" if on_play else f"bold {ORANGE} on #1b1b21"
         button.append(label, style=style)
         self.query_one("#play", Static).update(button)
 
-        hint = Text("↑/↓ move   ", style=DIM)
+        hint = Text("↑/↓ move   ←/→ stop after   ", style=DIM)
         hint.append("enter", style=f"bold {ORANGE}")
         hint.append(" select · play   ", style=DIM)
         hint.append("esc", style=f"bold {ORANGE}")
@@ -462,10 +493,11 @@ class ModeScreen(Screen):
         self.query_one("#hint", Static).update(hint)
 
     def _goal_summary(self) -> str:
+        stop = f" · stop after {n:,}" if (n := self.app.stop_after()) else ""
         if self.mode == "play":
-            return f"{PLAY_TOTAL:,} levels · {PLAY_DAYS} days"
+            return f"{PLAY_TOTAL:,} levels · {PLAY_DAYS} days{stop}"
         if self.mode == "custom":
-            return f"custom · {self.app.custom_schedule().per_day:,} / day"
+            return f"custom · {self.app.custom_schedule().per_day:,} / day{stop}"
         return "one level"
 
 
@@ -604,8 +636,7 @@ class CustomScreen(Screen):
             self.cursor = len(KNOBS)
             self.render_all()
             return
-        goal = Goal.custom(self.app.progress(), self.app.custom_schedule())
-        self.app.push_screen(RunScreen(goal))
+        self.app.run_goal(Goal.custom(self.app.progress(), self.app.custom_schedule()))
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -1003,6 +1034,22 @@ class WordsearchApp(App):
     def save_custom(self, schedule: Schedule) -> None:
         self._custom = schedule
         save_custom(self.root / "local" / "settings.json", schedule)
+
+    def stop_after(self) -> int:
+        """Levels to play before stopping (0 = no limit), remembered in settings.json."""
+        try:
+            return max(0, int(load_settings(self.root / "local" / "settings.json")["stop_after"]))
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    def save_stop_after(self, n: int) -> None:
+        save_setting(self.root / "local" / "settings.json", "stop_after", n)
+
+    def run_goal(self, goal: Goal) -> None:
+        if n := self.stop_after():
+            goal.session_target = n
+            goal.title += f" · stop after {n:,}"
+        self.push_screen(RunScreen(goal))
 
     def progress(self) -> Progress:
         return Progress(local_file(self.root, self.serial, "progress.json"))

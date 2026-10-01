@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +31,12 @@ SCALE = 0.5  # match on a half-res frame: ~4x faster, still plenty of detail for
 UNKNOWN_AFTER_S = 8.0  # board hidden and nothing matched this long -> unknown overlay
 APP_CHECK_EVERY_S = 5.0
 ACTION_SETTLE_S = 1.0  # after tapping a popup, give it this long to disappear
+# A toast last seen this recently may still be up. The watcher looks only ~2x a second,
+# so without the fast eye this must span a couple of its frames.
+COVER_LINGER_S = 1.0
+COVER_LINGER_EYE_S = 0.3
+EYE_BOX = (0.1, 0.5, 0.9, 0.95)  # screen fractions the toast shows in (any board, any phone)
+EYE_EVERY_S = 0.04
 
 
 @dataclass
@@ -49,6 +55,8 @@ class Popup:
     holdoff: float = 0.0  # don't tap within this long of tapping any other popup
     avoid: bool = False  # never tap: while it's visible its area is a no-tap zone (ad buttons)
     avoid_pad: tuple[int, int] = (40, 40)  # zone = template box grown by this (x, y)
+    # A toast over the board: the y range (relative to the match) where it swallows swipes
+    covers: tuple[int, int] | None = None
     last_hit: float = 0.0
     streak: int = 0
 
@@ -78,6 +86,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 holdoff=e.get("holdoff", 0.0),
                 avoid=e.get("avoid", False),
                 avoid_pad=tuple(e.get("avoid_pad", (40, 40))),
+                covers=tuple(e["covers"]) if "covers" in e else None,
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -113,12 +122,21 @@ class PopupWatcher(threading.Thread):
         self._last_tap = 0.0  # monotonic time the watcher last tapped any popup
         self.hits: Counter[str] = Counter()
         self.last_match = 0.0  # monotonic time any popup template last matched
+        # The "already collected" toast: frame times it first showed (this appearance)
+        # and was last seen, and the screen rows it covers. See covering().
+        self.cover_since = 0.0
+        self.cover_seen = 0.0
+        self.cover_span = (0, 0)
+        self._eye = next((p for p in self.popups if p.covers), None)
+        self._eye_on = self._eye is not None and hasattr(device, "peek")
         self.board_visible = False
         # Set by the main thread while it solves a level. Then "board visible" is just
         # "the white panel is still exactly there": cheap, and unlike a full grid read
         # it isn't fooled by letters flying off after a word is found.
         self.expected_panel: tuple[int, int, int, int] | None = None
         self.frame: np.ndarray | None = None
+        # The newest frames with the board up (the level's last ones, at its end)
+        self.board_frames: deque[np.ndarray] = deque(maxlen=8)
         self.frame_time = 0.0
         self.fps = 0.0
         self._frame_cond = threading.Condition()
@@ -147,6 +165,8 @@ class PopupWatcher(threading.Thread):
 
     def run(self) -> None:
         log("WATCHER", "started")
+        if self._eye_on:
+            threading.Thread(target=self._watch_cover, daemon=True, name="toast-eye").start()
         failures = 0
         while not self.stop_event.is_set():
             if self.idle.is_set():
@@ -166,6 +186,13 @@ class PopupWatcher(threading.Thread):
             self.fps = 0.8 * self.fps + 0.2 * (1 / dt if dt > 0 else 0)
         log("WATCHER", "stopped")
 
+    def covering(self) -> tuple[int, int] | None:
+        """The y range a toast covers right now, or None. Swipes there are swallowed."""
+        linger = COVER_LINGER_EYE_S if self._eye_on else COVER_LINGER_S
+        if self.cover_seen and time.monotonic() - self.cover_seen <= linger:
+            return self.cover_span
+        return None
+
     def busy(self) -> bool:
         """True right after the watcher tapped something: give that popup time to go."""
         return time.monotonic() - self.last_action < ACTION_SETTLE_S
@@ -175,6 +202,8 @@ class PopupWatcher(threading.Thread):
         frame = self.device.frame()
         now = time.monotonic()
         self.board_visible = self._board_visible(frame)
+        if self.board_visible:
+            self.board_frames.append(frame)
         with self._frame_cond:
             self.frame, self.frame_time = frame, now
             self._frame_cond.notify_all()
@@ -191,7 +220,9 @@ class PopupWatcher(threading.Thread):
         if took > 2.0:
             log("WARN", f"slow watcher tick {took:.1f}s (screenshot {now - t0:.1f}s)")
 
-        if now - self._last_app_check > APP_CHECK_EVERY_S:
+        # The game gone: confirm it within ~2 s instead of ~10 (3 checks in a row).
+        every = 1.0 if getattr(self.device, "game_missing", lambda: False)() else APP_CHECK_EVERY_S
+        if now - self._last_app_check > every:
             self._last_app_check = now
             self._ensure_foreground()
 
@@ -225,6 +256,8 @@ class PopupWatcher(threading.Thread):
                 log("ERROR", f"match {popup.name} failed: {exc!r}")
                 continue
             scores.append((score, popup.name, center))
+            if popup.covers and score >= popup.threshold and not self._eye_on:
+                self._note_cover(popup, center, now)
             if popup.avoid:
                 self._guard(popup, center if score >= popup.threshold else None)
                 continue
@@ -255,7 +288,8 @@ class PopupWatcher(threading.Thread):
             return True
         popup.last_hit = now
         self.hits[popup.name] += 1
-        log("WATCHER", f"{popup.name} score={score:.2f} at {center}")
+        if popup.tap or not popup.covers:  # a toast left alone is logged by _note_cover
+            log("WATCHER", f"{popup.name} score={score:.2f} at {center}")
         if popup.level_done:
             self.level_done.set()
         if popup.tap:
@@ -270,6 +304,42 @@ class PopupWatcher(threading.Thread):
                 target = anchor or center
             self.device.tap(*target, why=popup.name, allow=popup.allow)
         return True
+
+    def _watch_cover(self) -> None:
+        """iPhone: frames are free, so look for the toast ~25x a second. At the watcher's
+        ~2 fps the bot learned of it up to 0.5 s late and kept swiping under it."""
+        w, h = self.device.calib
+        box = (
+            round(EYE_BOX[0] * w),
+            round(EYE_BOX[1] * h),
+            round(EYE_BOX[2] * w),
+            round(EYE_BOX[3] * h),
+        )
+        popup, (x0, y0, _, _) = self._eye, box
+        while not self.stop_event.is_set():
+            if self.idle.is_set():
+                self.stop_event.wait(1.0)
+                continue
+            try:
+                small, t = self.device.peek(box, SCALE)
+                score, (cx, cy) = match(small, popup)
+                if score >= popup.threshold:
+                    self._note_cover(popup, (x0 + cx, y0 + cy), t)
+            except Exception as exc:  # no frame yet, phone reconnecting
+                dbg(f"toast eye: {exc!r}")
+                self.stop_event.wait(1.0)
+            self.stop_event.wait(EYE_EVERY_S)
+
+    def _note_cover(self, popup: Popup, center: tuple[int, int], now: float) -> None:
+        if now - self.cover_seen > 0.5:  # gone that long: this is a new one
+            self.cover_since = now
+            log(
+                "WATCHER",
+                f"{popup.name} toast over y {center[1] + popup.covers[0]}-"
+                f"{center[1] + popup.covers[1]}",
+            )
+        self.cover_seen = now
+        self.cover_span = (center[1] + popup.covers[0], center[1] + popup.covers[1])
 
     def _guard(self, popup: Popup, center: tuple[int, int] | None) -> None:
         """Keep a no-tap zone over an avoid-template (an ad button) while it's visible."""

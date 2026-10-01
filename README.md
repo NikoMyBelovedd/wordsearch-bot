@@ -274,6 +274,8 @@ Use your keyboard: **↑ / ↓** to move, **Enter** to choose, **Esc** to go bac
 | **SINGLE LEVEL** | Plays one level, then stops. Good for a first test. |
 | **CUSTOM** | Your own pace. Press **Enter** on it to set levels per day (up to 5,000), how many hours to spread them over, breaks, and the start time. Use **← / →** to change a value; hold **Shift** for steps 10 times bigger. Your settings are remembered. |
 
+Below the modes, **STOP AFTER** sets how many levels this run plays before it stops: **← / →** changes it by 1, **Shift** by 10, and 0 means no limit. It's remembered too.
+
 Then move to **▶ PLAY** and press **Enter**.
 
 **Screen 3: the run.** This screen shows:
