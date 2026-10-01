@@ -66,19 +66,37 @@ def _score(a: np.ndarray, b: np.ndarray) -> float:
     return float(cv2.matchTemplate(a, b, cv2.TM_CCOEFF_NORMED)[0, 0])
 
 
+def _unit(img: np.ndarray) -> tuple[np.ndarray, bool]:
+    """The image as a zero-mean unit vector, and whether it was flat (no contrast).
+
+    TM_CCOEFF_NORMED of two same-size images is the dot product of these vectors, so
+    one matrix product scores a glyph against every template at once.
+    """
+    v = img.astype(np.float64).ravel()
+    v -= v.mean()
+    n = float(np.linalg.norm(v))
+    return (v / n, False) if n > 1e-9 else (v, True)
+
+
 class LetterReader:
     def __init__(self, folder: Path) -> None:
         self.game_dir = folder / "game"
         self.game_dir.mkdir(parents=True, exist_ok=True)
         self.templates: list[tuple[str, np.ndarray]] = []
         self.learned: set[str] = set()  # letters with at least one real board glyph
+        # ranked() scores against these in one matrix product: one matchTemplate call
+        # per template took 6.3 s a 10x9 board on a 2-core laptop (517 templates), and
+        # boards are read twice per level start and after every pause.
+        self._rows: list[np.ndarray] = []
+        self._flat: list[bool] = []
+        self._mat: np.ndarray | None = None
         for sub in ("ref", "game"):
             for p in sorted((folder / sub).glob("*.png")):
                 img = imread(p, cv2.IMREAD_GRAYSCALE)
                 if img is None:
                     continue
                 letter = p.stem.split("_")[0]
-                self.templates.append((letter, img))
+                self._add(letter, img)
                 if sub == "game":
                     self.learned.add(letter)
         n, learned = len(self.templates), len(self.learned)
@@ -86,11 +104,23 @@ class LetterReader:
         if TESSERACT is None:
             log("WARNING", "Tesseract not found: new glyphs can't be learned (set TESSERACT_CMD)")
 
+    def _add(self, letter: str, tmpl: np.ndarray) -> None:
+        self.templates.append((letter, tmpl))
+        row, flat = _unit(tmpl)
+        self._rows.append(row)
+        self._flat.append(flat)
+        self._mat = None
+
     def ranked(self, norm: np.ndarray) -> list[tuple[float, str]]:
-        """Best score per letter, highest first."""
+        """Best score per letter, highest first (same scores as matchTemplate)."""
+        if self._mat is None:
+            self._mat = np.stack(self._rows)
+            self._flat_idx = np.flatnonzero(self._flat)
+        g, flat = _unit(norm)
+        scores = np.zeros(len(self._rows)) if flat else self._mat @ g
+        scores[self._flat_idx] = 1.0  # what matchTemplate says for a flat template
         best: dict[str, float] = {}
-        for letter, tmpl in self.templates:
-            s = _score(norm, tmpl)
+        for (letter, _), s in zip(self.templates, scores.tolist(), strict=True):
             if s > best.get(letter, -1.0):
                 best[letter] = s
         return sorted(((s, letter) for letter, s in best.items()), reverse=True)
@@ -110,7 +140,7 @@ class LetterReader:
     def learn(self, letter: str, norm: np.ndarray) -> None:
         n = len(list(self.game_dir.glob(f"{letter}_*.png"))) + 1
         imwrite(self.game_dir / f"{letter}_{n}.png", norm)
-        self.templates.append((letter, norm))
+        self._add(letter, norm)
         self.learned.add(letter)
         log("OCR", f"learned '{letter}' from the board (variant {n})")
 

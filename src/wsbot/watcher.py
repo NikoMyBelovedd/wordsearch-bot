@@ -28,6 +28,8 @@ from .imgio import imread, imwrite
 from .log import log
 
 SCALE = 0.5  # match on a half-res frame: ~4x faster, still plenty of detail for buttons
+REFINE_PAD = 8  # half-res px around the quarter-res spot where match() scores a popup
+COARSE_MIN = 10  # templates smaller than this at quarter res are searched at half res
 UNKNOWN_AFTER_S = 8.0  # board hidden and nothing matched this long -> unknown overlay
 APP_CHECK_EVERY_S = 5.0
 ACTION_SETTLE_S = 1.0  # after tapping a popup, give it this long to disappear
@@ -57,6 +59,7 @@ class Popup:
     avoid_pad: tuple[int, int] = (40, 40)  # zone = template box grown by this (x, y)
     # A toast over the board: the y range (relative to the match) where it swallows swipes
     covers: tuple[int, int] | None = None
+    coarse: np.ndarray | None = None  # quarter-res template for match()'s first look
     last_hit: float = 0.0
     streak: int = 0
 
@@ -71,6 +74,7 @@ def load_popups(folder: Path) -> list[Popup]:
             log("WARN", f"popup template missing: {e['file']}")
             continue
         small = cv2.resize(img, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
+        quarter = cv2.resize(small, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
         popups.append(
             Popup(
                 name=e["name"],
@@ -87,6 +91,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 avoid=e.get("avoid", False),
                 avoid_pad=tuple(e.get("avoid_pad", (40, 40))),
                 covers=tuple(e["covers"]) if "covers" in e else None,
+                coarse=quarter if min(quarter.shape[:2]) >= COARSE_MIN else None,
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -99,11 +104,33 @@ def _tap_point(value) -> tuple[int, int] | str | None:
     return tuple(value)
 
 
-def match(small_frame: np.ndarray, popup: Popup) -> tuple[float, tuple[int, int]]:
-    """Best score and full-res center of `popup` in a half-res frame."""
+def coarse_frame(small_frame: np.ndarray) -> np.ndarray:
+    """The half-res frame halved again, for match()'s first look (once per frame)."""
+    return cv2.resize(small_frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+
+
+def match(
+    small_frame: np.ndarray, popup: Popup, coarse: np.ndarray | None = None
+) -> tuple[float, tuple[int, int]]:
+    """Best score and full-res center of `popup` in a half-res frame.
+
+    With `coarse` (coarse_frame of it): find the spot at quarter res, then score it at
+    half res in a small window around it. Same scores, ~4x less work: the full
+    half-res search took 2.4 s a tick for 18 templates on a 2-core laptop (i5-6200U),
+    so popups, toasts and level ends were seen seconds late.
+    """
+    th, tw = popup.template.shape[:2]
+    ox = oy = 0
+    if coarse is not None and popup.coarse is not None:
+        res = cv2.matchTemplate(coarse, popup.coarse, cv2.TM_CCOEFF_NORMED)
+        _, _, _, (qx, qy) = cv2.minMaxLoc(res)
+        h, w = small_frame.shape[:2]
+        ox, oy = max(0, 2 * qx - REFINE_PAD), max(0, 2 * qy - REFINE_PAD)
+        x1, y1 = min(w, 2 * qx + tw + REFINE_PAD), min(h, 2 * qy + th + REFINE_PAD)
+        small_frame = small_frame[oy:y1, ox:x1]
     res = cv2.matchTemplate(small_frame, popup.template, cv2.TM_CCOEFF_NORMED)
     _, score, _, loc = cv2.minMaxLoc(res)
-    th, tw = popup.template.shape[:2]
+    loc = (loc[0] + ox, loc[1] + oy)
     cx, cy = (loc[0] + tw / 2) / SCALE, (loc[1] + th / 2) / SCALE
     return float(score), (round(cx), round(cy))
 
@@ -210,7 +237,7 @@ class PopupWatcher(threading.Thread):
 
         small = cv2.resize(frame, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
         snap("calib_frame", frame, every_s=15, note=f"board_visible={self.board_visible}")
-        matched = self._handle_popups(small, now)
+        matched = self._handle_popups(small, coarse_frame(small), now)
         if matched or self.board_visible:
             self._hidden_since = None
         else:
@@ -245,13 +272,13 @@ class PopupWatcher(threading.Thread):
             and covered_below(frame, panel)
         )
 
-    def _handle_popups(self, small: np.ndarray, now: float) -> bool:
+    def _handle_popups(self, small: np.ndarray, coarse: np.ndarray, now: float) -> bool:
         """Act on the highest-priority popup that is on screen. True if any matched."""
         hit = None
         scores = []
         for popup in self.popups:
             try:
-                score, center = match(small, popup)
+                score, center = match(small, popup, coarse)
             except Exception as exc:
                 log("ERROR", f"match {popup.name} failed: {exc!r}")
                 continue

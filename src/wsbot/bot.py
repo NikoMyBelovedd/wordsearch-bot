@@ -5,16 +5,20 @@ and owns every screenshot; this thread only reads its frames and swipes.
 
 Solving escalates through passes until the level ends:
   1. fast        every dictionary word once (best-ranked path), back to back
-  2. retry       the common dictionary words still unlit, once more with a breath
-                 between swipes: the iPhone game drops some back-to-back swipes, and
-                 the exhaustive pass reaches short ones (MILK, OIL) only at its end
-  3. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
+  2. retry       the common dictionary words still unlit, and every unlit one of 5+
+                 letters, once more with a breath between swipes: the iPhone game
+                 drops some back-to-back swipes, and the exhaustive pass reaches short
+                 ones (MILK, OIL) only at its end and never re-fires a swiped word
+                 (ICICLES, rank 42,102, waited for the repeat pass)
+  3. careful     the unlit 5+ letter dictionary words once more, slowly with a long
+                 breath: a long theme word the game dropped twice
+  4. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
                  yet: finds words the dictionary doesn't know (ORANGUTAN)
-  4. slow        lines outside the dictionary on unlit cells, once more, slowly: the
+  5. slow        lines outside the dictionary on unlit cells, once more, slowly: the
                  game drops a swipe now and then, and the exhaustive pass has one shot
-  5. repeat      last resort: every path of every word not yet highlighted, even
+  6. repeat      last resort: every path of every word not yet highlighted, even
                  ones already swiped
-  6. restart     relaunch the app and start the level over
+  7. restart     relaunch the app and start the level over
 
 A word is swiped once per level before the repeat pass: re-swiping one the game has
 already taken (a bonus word) pops an "already collected" toast over the bottom rows
@@ -53,6 +57,18 @@ STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finis
 PROGRESS_CHECK_EVERY = 300  # exhaustive swipes between "is anything still being found?"
 HUNG_S = 40.0  # board gone and not one pixel changed this long despite clear taps: hung
 RETRY_RANK = 20_000  # retry pass: dictionary words this common (MILK, OIL, CHARGER 4,635)
+# ...and dictionary words this long at any rank: long theme words are often rare
+# (ICICLES 42,102, FRISBEE 35,363, PINWHEEL 59,144). Only the retry pass re-fires a
+# dropped dictionary word, so outside it they waited for the repeat pass, minutes
+# later. Costs ~4.6 swipes a level (4+ letters would be ~14, mostly junk). Only while
+# at least half their cells are unlit: a bonus word the game already took mostly lies
+# on found words (TRESSED on DESSERT's row), and re-swiping it pops the toast; with
+# them the retry pass of level 5378 waited out 5 toasts (27 s).
+RETRY_MIN_LEN = 5
+# 4-letter words too, while every cell is unlit: rare short theme words (HARP 39,783,
+# LUTE, OBOE, LYRE, GONG, FIFE all > 20k) were dropped the same way; HARP, the first
+# swipe of its level, fell to the exhaustive pass. ~10 such words a board at most.
+RETRY_SHORT_LEN = 4
 # Swipes fired this long before the toast was first seen landed under it (the eye sees
 # it ~50 ms late). Wider re-fired swipes from just before it showed: taken bonus words,
 # whose re-swipe popped another toast, in a cascade (the retry pass took 32 s).
@@ -76,6 +92,7 @@ class Pacing:
     refire_swipe_ms: int = 120  # later passes go slower, in case speed caused a miss
     refire_gap_s: float = 0.1
     retry_gap_s: float = 0.1  # retry pass: a breath between swipes lets the game take each
+    careful_gap_s: float = 0.5  # careful pass: the game took 5/5 dropped words with long pauses
     settle_s: float = 0.3  # pause after a popup clears before swiping again
     clear_tap_s: float = 2.5  # board hidden this long with no known popup -> clear tap
     level_end_s: float = 2.5  # how long to wait for the level to end after a pass
@@ -126,6 +143,7 @@ class Bot:
         self.held_at: float | None = None  # see _ready_to_swipe
         self.maybe_eaten: set[Hit] = set()
         self._input_blocked = False
+        self._blocked_grid: list[str] | None = None  # level a "touches ignored" restart was for
         # Words swiped on the current level, saved so a bot restart mid-level doesn't
         # re-swipe them (each re-swipe of a taken word pops a toast).
         self._swiped_path = local_file(root, serial, "level_swiped.json")
@@ -377,13 +395,19 @@ class Bot:
             return [h for h in todo if h.word not in done]
 
         self.maybe_eaten: set[Hit] = set()  # fired just before a popup (see burst)
-        common = [h for h in fast if h.rank < RETRY_RANK]
+        common = [h for h in fast if h.rank < RETRY_RANK or len(h.word) >= RETRY_SHORT_LEN]
+        long_words = [h for h in fast if len(h.word) >= RETRY_SHORT_LEN]
+
+        def open_long(hits: list[Hit]) -> list[Hit]:
+            todo = self._unlit(board, hits)
+            return [h for h in todo if h.rank < RETRY_RANK or _open(h, self.found_cells)]
 
         def retry() -> list[Hit]:
             # Re-swiping taken bonus words pops toasts over the bottom rows: fire the
             # words there first, before the first toast can hold them up.
             first = sorted(self.maybe_eaten)
-            todo = self._unlit(board, first + [h for h in common if h not in self.maybe_eaten])
+            rest = open_long([h for h in common if h not in self.maybe_eaten])
+            todo = self._unlit(board, first) + rest
             low = board.rows - 2
             return sorted(_subwords_last(todo), key=lambda h: max(h.start[0], h.end[0]) < low)
 
@@ -392,6 +416,15 @@ class Bot:
             ("fast", lambda: new(self._unlit(board, fast)), p.swipe_ms, p.gap_s, 0),
             # not filtered by new(): these are the swiped words the game didn't take
             ("retry", retry, p.swipe_ms, p.retry_gap_s, 0),
+            # still unlit after two tries: one slow, spaced-out try before the long
+            # exhaustive pass (a few swipes, a few seconds)
+            (
+                "careful",
+                lambda: [h for h in self._unlit(board, long_words) if _open(h, self.found_cells)],
+                p.refire_swipe_ms,
+                p.careful_gap_s,
+                0,
+            ),
             (
                 "exhaustive",
                 lambda: new(self._unlit(board, all_lines(grid), most_unlit_first=True)),
@@ -409,7 +442,7 @@ class Bot:
         try:
             for name, pick, ms, gap, check_every in passes:
                 todo = pick()
-                if not todo and name in ("retry", "slow"):
+                if not todo and name in ("retry", "careful", "slow"):
                     continue
                 self.phase = f"{name} ({len(todo)})"
                 if name != "fast":
@@ -472,9 +505,12 @@ class Bot:
                 return
         fresh = lit - lit_before
         g = self.grid
-        dbg(
-            f"learn: over={over} lit {len(lit_before)}->{len(lit)}, new cells "
-            f"{' '.join(f'{g[r][c]}{r},{c}' for r, c in sorted(fresh))}"
+        # In the main log: the cells a late pass lit spell the word it finally found,
+        # which tells why the earlier passes missed it.
+        log(
+            "PASS",
+            f"late find: lit {len(lit_before)}->{len(lit)}, new cells "
+            f"{' '.join(f'{g[r][c]}{r},{c}' for r, c in sorted(fresh))}",
         )
         # A found word lights exactly its own cells, so the line must cover a whole lit
         # run: a piece of a longer find (MOAR inside a found row) has lit cells beyond an
@@ -548,6 +584,14 @@ class Bot:
             if alive is not False:
                 return
             time.sleep(1.0)
+        # Once per level. The probe can read IGNORED on a board that takes touches (at
+        # level 5382 it did so 3 restarts in a row, every time just before the
+        # exhaustive pass that alone could find SCAVENGER; run by hand the same drag
+        # registered). A real freeze costs a pass of swipes; a restart loop, the level.
+        if self._blocked_grid is not None and same_level(self.grid, self._blocked_grid):
+            log("PROBE", "still reads IGNORED after a restart on this level; carrying on")
+            return
+        self._blocked_grid = self.grid
         raise InputBlocked
 
     def _probe_input(self, board: Board, lit: set[tuple[int, int]]) -> bool | None:
@@ -924,6 +968,20 @@ def _subwords_last(hits: list[Hit]) -> list[Hit]:
     return [h for h, i in zip(hits, inside, strict=True) if not i] + [
         h for h, i in zip(hits, inside, strict=True) if i
     ]
+
+
+def _mostly_unlit(hit: Hit, lit: set[tuple[int, int]]) -> bool:
+    """At least half the hit's cells, and 2 or more, are not yet on a found word."""
+    cells = path_cells(hit)
+    n = sum(c not in lit for c in cells)
+    return n >= 2 and 2 * n >= len(cells)
+
+
+def _open(hit: Hit, lit: set[tuple[int, int]]) -> bool:
+    """A rare word worth re-firing: 5+ letters mostly unlit, or 4 letters all unlit."""
+    if len(hit.word) >= RETRY_MIN_LEN:
+        return _mostly_unlit(hit, lit)
+    return len(hit.word) == RETRY_SHORT_LEN and not any(c in lit for c in path_cells(hit))
 
 
 def _whole_run(hit: Hit, lit: set[tuple[int, int]]) -> bool:

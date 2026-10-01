@@ -10,9 +10,9 @@ import cv2
 import numpy as np
 
 from wsbot.imgio import imread, imwrite
-from wsbot.letters import LetterReader, normalize
+from wsbot.letters import LetterReader, _score, normalize
 from wsbot.solver import Dictionary
-from wsbot.watcher import load_popups
+from wsbot.watcher import SCALE, coarse_frame, load_popups, match
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,3 +77,37 @@ def test_learning_needs_a_whole_lit_run():
     assert not _whole_run(Hit(0, "MOAR", (0, 4), (0, 7)), lit)
     assert _whole_run(Hit(0, "LMOAR", (0, 3), (0, 7)), lit)
     assert _whole_run(Hit(0, "RAOML", (0, 7), (0, 3)), lit)
+
+
+def test_coarse_popup_match_finds_the_same_spot_and_score():
+    """match() with a quarter-res first look must agree with the full half-res search."""
+    rng = np.random.default_rng(7)
+    for p in load_popups(ROOT / "templates" / "ios"):
+        frame = rng.integers(0, 255, (2305 // 2, 1296 // 2, 3), dtype=np.uint8)
+        frame = cv2.GaussianBlur(frame, (9, 9), 0)  # game screens are smooth, not noise
+        th, tw = p.template.shape[:2]
+        y, x = 400, 600 - tw
+        frame[y : y + th, x : x + tw] = p.template
+        full = match(frame, p)
+        fast = match(frame, p, coarse_frame(frame))
+        assert full[0] > 0.99, p.name
+        assert fast[1] == full[1], p.name
+        assert abs(fast[0] - full[0]) < 1e-4, p.name
+        assert fast[1] == (round((x + tw / 2) / SCALE), round((y + th / 2) / SCALE))
+
+
+def test_letter_scores_match_one_template_at_a_time(tmp_path: Path):
+    """ranked() scores every template in one matrix product; it must equal matchTemplate."""
+    reader = LetterReader(ROOT / "templates" / "letters")
+    rng = np.random.default_rng(3)
+    for letter, tmpl in reader.templates[::40]:
+        noisy = np.clip(tmpl.astype(int) + rng.integers(-40, 40, tmpl.shape), 0, 255)
+        glyph = noisy.astype(np.uint8)
+        best: dict[str, float] = {}
+        for other, t in reader.templates:
+            best[other] = max(best.get(other, -1.0), _score(glyph, t))
+        fast = dict((name, s) for s, name in reader.ranked(glyph))
+        assert fast.keys() == best.keys()
+        assert all(abs(fast[k] - best[k]) < 1e-5 for k in best), letter
+        assert reader.ranked(glyph)[0][1] == max(best, key=best.get)
+    assert reader.ranked(np.zeros((64, 64), np.uint8))[0][0] == 0.0  # blank cell

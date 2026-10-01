@@ -1,6 +1,6 @@
 [project]
 name = "wsbot"
-version = "1.2.0"
+version = "1.2.1"
 description = "Auto-solver for Word Search Explorer on Android (ADB) and iPhone (USB)"
 readme = "README.md"
 license = "MIT"
