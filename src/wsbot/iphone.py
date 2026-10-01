@@ -133,6 +133,16 @@ def _uncollapse(img: np.ndarray) -> np.ndarray:
     return img
 
 
+def _quiet_resets(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Windows' proactor logs a full traceback each time the phone drops a connection
+    (every stream restart): "ConnectionResetError: [WinError 10054]". Harmless; keep it
+    out of the log, report everything else as usual."""
+    if isinstance(context.get("exception"), ConnectionResetError):
+        dbg(f"iphone loop: {context.get('message')}: connection reset")
+        return
+    loop.default_exception_handler(context)
+
+
 class IPhone:
     tap_ms = 30  # contact time of a tap
     # Swipes: contact at the start, `steps` evenly timed samples, lift. 1.8 ms swipes
@@ -146,6 +156,7 @@ class IPhone:
         self._loop = asyncio.new_event_loop()
         # ScreenStreamServer.serve() installs Ctrl-C handlers; only the main thread may.
         self._loop.add_signal_handler = lambda *a, **k: None
+        self._loop.set_exception_handler(_quiet_resets)
         threading.Thread(target=self._loop.run_forever, name="iphone-loop", daemon=True).start()
         self._srv = None
         self._serve_task: asyncio.Task | None = None

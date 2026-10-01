@@ -59,6 +59,9 @@ HIDDEN_END_S = 3.0
 MID_LEVEL_HOLD_S = 3.0  # a mid-level popup seen this recently explains a hidden board
 STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finished
 PROGRESS_CHECK_EVERY = 300  # exhaustive swipes between "is anything still being found?"
+# The game left alone this long (bot start, a break, the night) ignored every touch
+# until relaunched: the first level burned its fast pass, then a probe restarted it.
+IDLE_RELAUNCH_S = 300.0
 HUNG_S = 40.0  # board gone and not one pixel changed this long despite clear taps: hung
 RETRY_RANK = 20_000  # retry pass: dictionary words this common (MILK, OIL, CHARGER 4,635)
 # ...and dictionary words this long at any rank: long theme words are often rare
@@ -133,6 +136,7 @@ class Bot:
         self.pacer = Pacer(goal.schedule, goal.progress) if goal.schedule else None
         self.resting_until: float | None = None  # epoch; set while idling / on a break
         self.stats = Stats()
+        self._relaunch = True  # see IDLE_RELAUNCH_S
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         # Live state for the UI.
@@ -532,7 +536,8 @@ class Bot:
         ]
         # Up to 2 cells may have been lit before: theme words cross found ones
         # (PORCUPINE's E was BULLET's). Then the line minus that end qualifies too
-        # (PORCUPIN): both get learned; a stray one costs a swipe on boards that have it.
+        # (PORCUPIN, NETBAL inside NETBALL): keep only the longest line.
+        keep = _drop_ambiguous(keep)
         words = sorted({h.word for h in keep})
         if not words or len(words) > 8:
             return
@@ -763,6 +768,10 @@ class Bot:
                         self._rest(wait, "waiting for today's play window")
                         continue
 
+                    if self._relaunch:
+                        self._relaunch = False
+                        self.restart_app("it ignores touches after sitting idle", fresh=True)
+                        previous = None
                     self.status = "reading board"
                     self.phase = ""
                     board, grid = self.wait_for_board(
@@ -861,10 +870,16 @@ class Bot:
         finally:
             self.watcher.idle.clear()
             self.resting_until = None
+            if seconds >= IDLE_RELAUNCH_S:
+                self._relaunch = True
 
-    def restart_app(self, why: str) -> None:
-        self.stats.restarts += 1
-        log("RECOVERY", f"restarting the game: {why}")
+    def restart_app(self, why: str, *, fresh: bool = False) -> None:
+        """fresh: a routine relaunch, not a recovery (not counted as a restart)."""
+        if fresh:
+            log("LOG", f"relaunching the game: {why}")
+        else:
+            self.stats.restarts += 1
+            log("RECOVERY", f"restarting the game: {why}")
         self.status = "restarting game"
         if not self.device.dry_run:
             self.device.app_stop(PACKAGE)
@@ -879,6 +894,7 @@ class Bot:
         self.watcher.idle.set()  # stop screenshotting while there's nothing to do
         self.stop_event.wait(wait)
         self.watcher.idle.clear()
+        self._relaunch = True
 
     def _load_swiped(self) -> tuple[set[str], list[str] | None]:
         try:
@@ -977,6 +993,19 @@ def _subwords_last(hits: list[Hit]) -> list[Hit]:
     return [h for h, i in zip(hits, inside, strict=True) if not i] + [
         h for h, i in zip(hits, inside, strict=True) if i
     ]
+
+
+def _drop_ambiguous(hits: list[Hit]) -> list[Hit]:
+    """Learning candidates minus lines inside a longer one (NETBAL in NETBALL). Two that
+    only partly overlap (ITIND, TINDY around 3 new cells) can't both be the find, and
+    which one is can't be told: learn neither."""
+    cells = [frozenset(path_cells(h)) for h in hits]
+    keep = [h for h, c in zip(hits, cells, strict=True) if not any(c < o for o in cells)]
+    kept = {frozenset(path_cells(h)) for h in keep}
+    if any(a != b and a & b for a in kept for b in kept):
+        dbg(f"learn: skipped {sorted(h.word for h in keep)}: overlapping lines")
+        return []
+    return keep
 
 
 def _mostly_unlit(hit: Hit, lit: set[tuple[int, int]]) -> bool:

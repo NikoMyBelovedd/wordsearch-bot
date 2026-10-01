@@ -55,7 +55,11 @@ def main() -> None:
 
         return diag(serial, ROOT, overlay=args.calibrate)
     if args.headless:
-        return headless(serial, args.mode, args.per_day, args.dry_run, args.fast, args.levels)
+        try:
+            return headless(serial, args.mode, args.per_day, args.dry_run, args.fast, args.levels)
+        except KeyboardInterrupt:  # stopped before the bot was up (its SIGINT handler)
+            print("stopped")
+            return None
 
     from .tui import run_tui
 

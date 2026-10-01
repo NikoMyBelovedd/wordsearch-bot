@@ -79,6 +79,18 @@ def test_learning_needs_a_whole_lit_run():
     assert _whole_run(Hit(0, "RAOML", (0, 7), (0, 3)), lit)
 
 
+def test_learning_keeps_the_longest_and_skips_ambiguous_lines():
+    from wsbot.bot import _drop_ambiguous
+    from wsbot.solver import Hit
+
+    netball = Hit(0, "NETBALL", (4, 0), (4, 6))
+    llabten = Hit(0, "LLABTEN", (4, 6), (4, 0))
+    netbal = Hit(0, "NETBAL", (4, 0), (4, 5))
+    assert _drop_ambiguous([netbal, netball, llabten]) == [netball, llabten]
+    itind, tindy = Hit(0, "ITIND", (0, 0), (4, 4)), Hit(0, "TINDY", (1, 1), (5, 5))
+    assert _drop_ambiguous([itind, tindy]) == []
+
+
 def test_coarse_popup_match_finds_the_same_spot_and_score():
     """match() with a quarter-res first look must agree with the full half-res search."""
     rng = np.random.default_rng(7)
