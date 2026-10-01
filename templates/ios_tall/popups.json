@@ -86,7 +86,8 @@
     "threshold": 0.85,
     "cooldown": 3.0,
     "tap_point": "@star",
-    "allow": "star_bonus_jar"
+    "allow": "star_bonus_jar",
+    "mid_level": true
   },
   {
     "name": "tutorial_daily_challenge",
@@ -107,7 +108,8 @@
     "name": "bonus_claim",
     "file": "bonus_claim.png",
     "threshold": 0.85,
-    "cooldown": 1.5
+    "cooldown": 1.5,
+    "mid_level": true
   },
   {
     "name": "awesome",
@@ -149,6 +151,6 @@
     "threshold": 0.88,
     "cooldown": 1.5,
     "confirm": 8,
-    "holdoff": 4.0
+    "holdoff": 8.0
   }
 ]

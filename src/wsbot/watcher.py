@@ -59,6 +59,8 @@ class Popup:
     avoid_pad: tuple[int, int] = (40, 40)  # zone = template box grown by this (x, y)
     # A toast over the board: the y range (relative to the match) where it swallows swipes
     covers: tuple[int, int] | None = None
+    # Shows during a level (the bonus jar): the board hidden under it isn't the level ending
+    mid_level: bool = False
     coarse: np.ndarray | None = None  # quarter-res template for match()'s first look
     last_hit: float = 0.0
     streak: int = 0
@@ -91,6 +93,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 avoid=e.get("avoid", False),
                 avoid_pad=tuple(e.get("avoid_pad", (40, 40))),
                 covers=tuple(e["covers"]) if "covers" in e else None,
+                mid_level=e.get("mid_level", False),
                 coarse=quarter if min(quarter.shape[:2]) >= COARSE_MIN else None,
             )
         )
@@ -149,6 +152,7 @@ class PopupWatcher(threading.Thread):
         self._last_tap = 0.0  # monotonic time the watcher last tapped any popup
         self.hits: Counter[str] = Counter()
         self.last_match = 0.0  # monotonic time any popup template last matched
+        self.mid_level_seen = 0.0  # monotonic time a mid_level popup last matched
         # The "already collected" toast: frame times it first showed (this appearance)
         # and was last seen, and the screen rows it covers. See covering().
         self.cover_since = 0.0
@@ -305,6 +309,8 @@ class PopupWatcher(threading.Thread):
             return False
         popup, score, center = hit
         self.last_match = now
+        if popup.mid_level:
+            self.mid_level_seen = now
         # The top match owns this frame even while cooling down or unconfirmed, so a
         # lower-priority button (like a close X) never jumps ahead of it.
         if popup.streak < popup.confirm or now - popup.last_hit < popup.cooldown:

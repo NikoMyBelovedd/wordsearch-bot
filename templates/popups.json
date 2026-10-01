@@ -33,13 +33,15 @@
       216,
       205
     ],
-    "allow": "star_bonus_jar"
+    "allow": "star_bonus_jar",
+    "mid_level": true
   },
   {
     "name": "bonus_claim",
     "file": "bonus_claim.png",
     "threshold": 0.85,
-    "cooldown": 1.5
+    "cooldown": 1.5,
+    "mid_level": true
   },
   {
     "name": "awesome",

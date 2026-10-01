@@ -52,7 +52,11 @@ from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
 MAX_DIAGNOSTICS = 150  # newest dumps kept; a 10-day run must not fill the disk
-HIDDEN_END_S = 1.5  # board gone this long after a pass = the level is over
+# Board gone this long after a pass = the level is over. 3 s, not 1.5: the bonus
+# "Claim" popup fades in over the board ~1 s before the watcher sees it, and 1.5 s
+# counted that as a level end. Free: the next board takes 5+ s to come anyway.
+HIDDEN_END_S = 3.0
+MID_LEVEL_HOLD_S = 3.0  # a mid-level popup seen this recently explains a hidden board
 STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finished
 PROGRESS_CHECK_EVERY = 300  # exhaustive swipes between "is anything still being found?"
 HUNG_S = 40.0  # board gone and not one pixel changed this long despite clear taps: hung
@@ -710,6 +714,11 @@ class Bot:
             if board is None and self.watcher.covering():
                 # The "already collected" toast cuts the board short for ~1.5 s: that
                 # counted fake "level done"s, then "the previous level is still on screen".
+                hidden_since = None
+                continue
+            if board is None and now - self.watcher.mid_level_seen < MID_LEVEL_HOLD_S:
+                # The bonus jar popup (opened by its tutorial) covers the whole board:
+                # that counted a fake "level done" mid-level.
                 hidden_since = None
                 continue
             if board is None:
