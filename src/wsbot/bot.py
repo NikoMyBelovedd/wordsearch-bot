@@ -138,6 +138,8 @@ class Bot:
         self.stats = Stats()
         self._relaunch = True  # see IDLE_RELAUNCH_S
         self.stop_event = threading.Event()
+        # Set while AutomationHQ has paused the bot (see control.py).
+        self.pause_event = threading.Event()
         self.pause_event = threading.Event()
         # Live state for the UI.
         self.grid: list[str] = []
@@ -349,6 +351,9 @@ class Bot:
             if check_every and n and n % check_every == 0:
                 self._check_input(board, self._lit_cells(board))
             n += 1
+            self._hold()
+            if self.stop_event.is_set():
+                return False
             t = time.monotonic()
             ok = self.device.swipe(
                 board.cell(*hit.start).center, board.cell(*hit.end).center, ms, why=hit.word
@@ -754,6 +759,7 @@ class Bot:
         try:
             while not self.stop_event.is_set():
                 try:
+                    self._hold()
                     if self.goal.finished():
                         g = self.goal
                         if g.session_target is not None and g.session_levels >= g.session_target:
@@ -866,12 +872,32 @@ class Bot:
             self.watcher.idle.set()
         try:
             while not self.stop_event.is_set() and (left := until - time.time()) > 0:
+                self._hold()
                 self.stop_event.wait(min(1.0, left))
         finally:
             self.watcher.idle.clear()
             self.resting_until = None
             if seconds >= IDLE_RELAUNCH_S:
                 self._relaunch = True
+
+    def _hold(self) -> None:
+        """While AutomationHQ has paused the bot, wait here; then carry on from here."""
+        if not self.pause_event.is_set() or self.stop_event.is_set():
+            return
+        log("AHQ", "paused")
+        status, self.status = self.status, "paused"
+        self.watcher.idle.set()
+        since = time.monotonic()
+        try:
+            while self.pause_event.is_set() and not self.stop_event.is_set():
+                self.stop_event.wait(0.5)
+        finally:
+            self.watcher.idle.clear()
+            self.status = status
+        if time.monotonic() - since >= IDLE_RELAUNCH_S:
+            self._relaunch = True  # the game ignores touches after sitting idle
+        if not self.stop_event.is_set():
+            log("AHQ", "resumed")
 
     def restart_app(self, why: str, *, fresh: bool = False) -> None:
         """fresh: a routine relaunch, not a recovery (not counted as a restart)."""

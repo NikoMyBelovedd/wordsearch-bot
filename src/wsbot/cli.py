@@ -99,6 +99,9 @@ def headless(
     goal.session_target = levels
     bot = Bot(serial, ROOT, goal, dry_run=dry_run)
     signal.signal(signal.SIGINT, lambda *_: bot.stop_event.set())
+    from .control import listen
+
+    listen(bot.pause_event)
     bot.run()
 
 
