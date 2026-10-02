@@ -49,21 +49,7 @@ def _memory_report() -> None:
     threading.Thread(target=report, daemon=True, name="memreport").start()
 
 
-def _experiments() -> None:
-    """Files in local/ that switch on experiments for testing: stream_pace (a number:
-    WSBOT_STREAM_PACE), no_audio (WSBOT_NO_AUDIO), stream_kbps (WSBOT_STREAM_KBPS)."""
-    f = ROOT / "local" / "stream_pace"
-    if f.exists() and not os.environ.get("WSBOT_STREAM_PACE"):
-        os.environ["WSBOT_STREAM_PACE"] = f.read_text(encoding="utf-8").strip() or "10"
-    if (ROOT / "local" / "no_audio").exists():
-        os.environ["WSBOT_NO_AUDIO"] = "1"
-    k = ROOT / "local" / "stream_kbps"
-    if k.exists() and not os.environ.get("WSBOT_STREAM_KBPS"):
-        os.environ["WSBOT_STREAM_KBPS"] = k.read_text(encoding="utf-8").strip()
-
-
 def main() -> None:
-    _experiments()
     from .slim import slim
 
     slim()
