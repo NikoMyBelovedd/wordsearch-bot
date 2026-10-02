@@ -85,11 +85,16 @@ NO_AUDIO = not os.environ.get("WSBOT_AUDIO")
 # receiver reports one-way delay / jitter (an old pymobiledevice3 bug did exactly
 # that by accident). WSBOT_STREAM_PACE="owrd=40,jitter=20" (ms) adds that much to
 # what our RCTL feedback reports; the file local/stream_pace in the repo works too.
+def _local_setting(name: str) -> str:
+    """The text of local/<name> in the repo ("" if there's none): test switches."""
+    f = Path(__file__).resolve().parents[2] / "local" / name
+    return f.read_text().strip() if f.is_file() else ""
+
+
 def _stream_pace() -> dict[str, int]:
     raw = os.environ.get("WSBOT_STREAM_PACE")
     if raw is None:
-        f = Path(__file__).resolve().parents[2] / "local" / "stream_pace"
-        raw = f.read_text().strip() if f.is_file() else ""
+        raw = _local_setting("stream_pace")
     out: dict[str, int] = {}
     for part in raw.replace(";", ",").split(","):
         key, _, val = part.partition("=")
@@ -128,7 +133,11 @@ KEY_RESTART_COOLDOWN_S = 20.0
 # no root, no separate tunneld window, and the phone's video (UDP) lands inside this
 # process, so the macOS firewall can't drop it (it did: 0 RTP packets with tunneld on a
 # Mac). "tunneld" = the root `pymobiledevice3 remote tunneld` service (Linux default).
-TUNNEL_MODE = os.environ.get("WSBOT_TUNNEL", "auto").lower()  # auto | userspace | tunneld
+TUNNEL_MODE = (
+    os.environ.get("WSBOT_TUNNEL")
+    or _local_setting("tunnel")  # the file local/tunnel in the repo, for tests
+    or "auto"
+).lower()  # auto | userspace | tunneld
 
 
 def use_userspace_tunnel() -> bool:
