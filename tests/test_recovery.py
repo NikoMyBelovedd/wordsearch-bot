@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from wsbot import iphone
-from wsbot.bot import Bot
+from wsbot.bot import Bot, Pacing
 from wsbot.instance import AlreadyRunning, acquire, lock_path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -239,3 +239,11 @@ def test_reopens_that_dont_hold_give_up():
     iphone.IPhone._escalate_run(fake, "frozen")
     assert len(reopens) == iphone.ESCALATION_REOPENS
     assert told and "keeps freezing" in told[0]
+
+
+def test_the_first_blind_tap_after_a_mid_level_vanish_waits_for_the_level_end_screen():
+    fake = SimpleNamespace(pacing=Pacing(), watcher=SimpleNamespace(last_match=0.0))
+    should = lambda now, at_least=None: Bot._should_clear_tap(fake, now, 0.0, 0.0, at_least)  # noqa: E731
+    assert should(2.5), "between levels: 2.5 s as before"
+    assert not should(2.5, at_least=Pacing().level_end_tap_s), "mid-level: not yet"
+    assert should(Pacing().level_end_tap_s, at_least=Pacing().level_end_tap_s)

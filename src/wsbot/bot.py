@@ -103,6 +103,10 @@ class Pacing:
     careful_gap_s: float = 0.5  # careful pass: the game took 5/5 dropped words with long pauses
     settle_s: float = 0.3  # pause after a popup clears before swiping again
     clear_tap_s: float = 2.5  # board hidden this long with no known popup -> clear tap
+    # The board vanishing mid-level is almost always the level ending: the game shows
+    # its level-complete screen 3-5 s later. Waiting this long before the first blind
+    # tap lets the watcher recognise it (a phone farm logged ~1 blind tap per level).
+    level_end_tap_s: float = 6.0
     level_end_s: float = 2.5  # how long to wait for the level to end after a pass
     no_board_restart_s: float = 150.0  # no board at all this long -> restart the app
 
@@ -190,12 +194,19 @@ class Bot:
             rows.append(row)
         return rows
 
-    def wait_for_board(self, *, different_from: list[str] | None = None, timeout: float = 20.0):
+    def wait_for_board(
+        self,
+        *,
+        different_from: list[str] | None = None,
+        timeout: float = 20.0,
+        first_tap_s: float | None = None,
+    ):
         """Block until two consecutive frames show the same readable board.
 
         While the board stays hidden and no known popup is being handled, tap to clear:
         the game's tutorial and bonus popups close on any click, so this handles them
-        without a template for each one.
+        without a template for each one. `first_tap_s`: wait at least this long before
+        the first such tap (the board just vanished mid-level: likely the level ending).
         """
         start = time.monotonic()
         deadline = start + timeout
@@ -224,7 +235,9 @@ class Bot:
                 return None, None
             if board is not None:
                 hidden_since = now
-            elif self._should_clear_tap(now, hidden_since, last_clear):
+            elif self._should_clear_tap(
+                now, hidden_since, last_clear, first_tap_s if last_clear == start else None
+            ):
                 last_clear = now
                 self._clear_tap()
             if self.watcher.busy():
@@ -273,8 +286,10 @@ class Bot:
             self.device.tap(*self.device.above_board, why="clear popup (above board)")
         self.clear_taps += 1
 
-    def _should_clear_tap(self, now: float, hidden_since: float, last_clear: float) -> bool:
-        wait = self.pacing.clear_tap_s
+    def _should_clear_tap(
+        self, now: float, hidden_since: float, last_clear: float, at_least: float | None = None
+    ) -> bool:
+        wait = max(self.pacing.clear_tap_s, at_least or 0.0)
         return (
             now - hidden_since >= wait
             and now - last_clear >= wait
@@ -303,7 +318,7 @@ class Bot:
             self.held_at = self.held_at or time.monotonic()
             self.status = "waiting for popup"
             t0 = time.monotonic()
-            _, new_grid = self.wait_for_board(timeout=20)
+            _, new_grid = self.wait_for_board(timeout=20, first_tap_s=self.pacing.level_end_tap_s)
             if new_grid is None:
                 # Couldn't read any board: that is not evidence of a new level (an
                 # unreadable glyph once ended a level early). Let the level-end
