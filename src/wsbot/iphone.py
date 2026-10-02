@@ -325,6 +325,8 @@ class IPhone:
         # someone asks (latest): the phone sends up to 60 a second, the bot looks at ~5.
         self._frame = None
         self._img: np.ndarray | None = None  # self._frame as BGR, once asked for
+        # One BGR converter for every frame (see _to_bgr); used under self._cond only
+        self._bgr = None
         self._quiet = False  # nobody looks: drop the phone's frames undecoded
         self._hw: str | bool | None = None  # GPU decoder: None = not tried, False = off
         self._hw_errors = 0
@@ -1178,7 +1180,14 @@ class IPhone:
             self._cond.notify_all()
 
     def _to_bgr(self, frame) -> np.ndarray:
-        img = frame.to_ndarray(format="bgr24")
+        # frame.to_ndarray(format="bgr24") set up a new converter for every frame, and
+        # one that splits each picture over a thread per core: ~3.5 ms of CPU a frame
+        # on 16 cores. One kept converter on this thread: ~0.4 ms, the same pixels.
+        if self._bgr is None:
+            from av.video.reformatter import VideoReformatter
+
+            self._bgr = VideoReformatter()
+        img = self._bgr.reformat(frame, format="bgr24", threads=1).to_ndarray()
         h, w = img.shape[:2]
         raw_shape = img.shape
         snap("phone_raw_decoded", img, every_s=60)

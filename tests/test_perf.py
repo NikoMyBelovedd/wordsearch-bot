@@ -535,3 +535,26 @@ def test_unknown_screen_saves_prune_the_folder(tmp_path, monkeypatch):
     assert len(pngs) == MAX_DIAGNOSTICS
     assert any(p.name.startswith("unknown_popup_") for p in pngs)
     assert not (tmp_path / "old_000.png").exists()
+
+
+def test_iphone_frames_convert_to_the_same_pixels():
+    """The one kept single-thread converter gives what frame.to_ndarray gave: the
+    software decoder's frames (yuvj420p) and a GPU decoder's (nv12), frame after frame,
+    back and forth between sizes."""
+    import av
+
+    from wsbot.iphone import IPhone
+
+    rng = np.random.default_rng(3)
+    phone = SimpleNamespace(_uncollapsed=0, _published_logged=5, _bgr=None)
+    kept = None
+    for w, h in [(752, 1344), (64, 96), (752, 1344)]:
+        img = cv2.GaussianBlur(rng.integers(0, 256, (h, w, 3), np.uint8), (0, 0), 2)
+        img[h // 3 :, : w // 2] = (30, 200, 90)
+        frame = av.VideoFrame.from_ndarray(img, format="bgr24")
+        for fmt in ("yuvj420p", "nv12", "yuvj420p"):
+            f = frame.reformat(format=fmt)
+            phone.width, phone.height = w, h
+            assert np.array_equal(IPhone._to_bgr(phone, f), f.to_ndarray(format="bgr24"))
+            kept = kept or phone._bgr
+            assert phone._bgr is kept
