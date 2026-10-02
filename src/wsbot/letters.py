@@ -20,7 +20,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pytesseract
 
 from .imgio import imread, imwrite
 from .log import log
@@ -48,8 +47,6 @@ def _find_tesseract() -> str | None:
 
 
 TESSERACT = _find_tesseract()
-if TESSERACT:
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT
 
 
 def normalize(glyph: np.ndarray) -> np.ndarray:
@@ -132,6 +129,9 @@ class LetterReader:
         scale = OCR_HEIGHT / img.shape[0]
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         img = cv2.copyMakeBorder(img, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+        import pytesseract  # only for a letter no template knows yet (it pulls in PIL)
+
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT
         text = pytesseract.image_to_string(
             img, config=f"--psm 8 -c tessedit_char_whitelist={string.ascii_uppercase}"
         ).strip()

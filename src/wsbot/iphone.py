@@ -47,6 +47,7 @@ BTN_DOWN, BTN_UP = 1, 2
 START_CODE = b"\x00\x00\x00\x01"
 STREAM_HEAD_MAX = 3_000_000
 _HEAD_STARTED = threading.Event()  # DEVTEST: raw /stream.bin bytes kept for offline replay
+DECODE_THREADS = int(os.environ.get("WSBOT_THREADS") or 1)
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
 # After a lost packet the stream server holds every frame until the phone sends a
 # keyframe. It asks once; when the phone ignores that, the picture stays frozen while
@@ -166,7 +167,10 @@ class IPhone:
         self._us = None  # pymobiledevice3 UserspaceRsdTunnel while one is open
         # frames
         self._cond = threading.Condition()
-        self._frame: np.ndarray | None = None
+        # The newest decoded frame (an av.VideoFrame), turned into a BGR array only when
+        # someone asks (latest): the phone sends up to 60 a second, the bot looks at ~5.
+        self._frame = None
+        self._img: np.ndarray | None = None  # self._frame as BGR, once asked for
         self._seq = 0
         self._frame_t = 0.0
         self.stream_connected = False
@@ -279,6 +283,7 @@ class IPhone:
             raise IPhoneError(f"phone call timed out after {timeout:.0f}s") from None
 
     def open(self, timeout: float = 60.0) -> None:
+        seq0 = self._seq
         self._call(self._open(), timeout)
         if self._reader is None or not self._reader.is_alive():
             self._stop.clear()
@@ -286,10 +291,11 @@ class IPhone:
                 target=self._read_frames, name="iphone-frames", daemon=True
             )
             self._reader.start()
-        # the first frame tells us the screen size
+        # The first frame of THIS session (a reopen keeps the old one in memory: it
+        # counted as "first frame", and the bot read a pre-unplug screen for minutes).
         t0 = time.monotonic()
         next_note = t0 + 5
-        while self._frame is None and time.monotonic() < t0 + 45:
+        while not self._fresh(seq0) and time.monotonic() < t0 + 45:
             time.sleep(0.05)
             if time.monotonic() > next_note:
                 next_note += 5
@@ -298,7 +304,7 @@ class IPhone:
                     f"waiting for the first frame {time.monotonic() - t0:.0f}s: {self.stats} "
                     f"server {self.srv_state()}",
                 )
-        if self._frame is None:
+        if not self._fresh(seq0):
             log("ERROR", f"no frames after 45s: {self.stats} server {self.srv_state()}")
             with contextlib.suppress(Exception):
                 c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -309,6 +315,9 @@ class IPhone:
                 "the screen stream sends no frames (is the phone unlocked, screen on?)"
             )
         log("DIAG", f"first frame after {time.monotonic() - t0:.1f}s: {self.stats}")
+
+    def _fresh(self, seq0: int) -> bool:
+        return self._frame is not None and self._seq > seq0
 
     def close(self) -> None:
         self._closing.set()
@@ -614,6 +623,8 @@ class IPhone:
                     # Not "AUTO": frame-threading workers hold our packets, and freeing
                     # the old decoder (a restart, shutdown) then deadlocks on the GIL.
                     codec.thread_type = "SLICE"
+                    # One bot per phone on one computer: no decoder thread per core each.
+                    codec.thread_count = DECODE_THREADS
                 try:
                     decoded = codec.decode(av.Packet(_annexb(au)))
                 except av.error.FFmpegError as exc:
@@ -636,7 +647,7 @@ class IPhone:
                                 f"pix_fmt={getattr(cc, 'pix_fmt', '?')} "
                                 f"{getattr(cc, 'width', '?')}x{getattr(cc, 'height', '?')}"
                             )
-                    self._publish(frame.to_ndarray(format="bgr24"))
+                    self._publish(frame)
         finally:
             conn.close()
 
@@ -655,7 +666,17 @@ class IPhone:
                     f.write(head + body)
                 self._head_bytes += len(head) + len(body)
 
-    def _publish(self, img: np.ndarray) -> None:
+    def _publish(self, frame) -> None:
+        """Keep the newest decoded frame; converting it waits until it's asked for."""
+        with self._cond:
+            self._frame, self._img = frame, None
+            self._seq += 1
+            self._frame_t = time.monotonic()
+            self.frames_decoded += 1
+            self._cond.notify_all()
+
+    def _to_bgr(self, frame) -> np.ndarray:
+        img = frame.to_ndarray(format="bgr24")
         h, w = img.shape[:2]
         raw_shape = img.shape
         snap("phone_raw_decoded", img, every_s=60)
@@ -675,19 +696,16 @@ class IPhone:
             dbg(f"publish: decoded {raw_shape} -> {img.shape} (screen {self.width}x{self.height})")
         if img.shape[1] != self.width or img.shape[0] != self.height:
             img = cv2.resize(img, (self.width, self.height), interpolation=cv2.INTER_AREA)
-        with self._cond:
-            self._frame = img
-            self._seq += 1
-            self._frame_t = time.monotonic()
-            self.frames_decoded += 1
-            self._cond.notify_all()
+        return img
 
     def latest(self) -> tuple[int, float, np.ndarray]:
         """(sequence number, time.monotonic() it arrived, BGR frame)."""
         with self._cond:
             if self._frame is None:
                 raise IPhoneError("no frame from the iPhone yet")
-            return self._seq, self._frame_t, self._frame
+            if self._img is None:  # a few ms, under the lock: one conversion per frame
+                self._img = self._to_bgr(self._frame)
+            return self._seq, self._frame_t, self._img
 
     def wait_newer(self, seq: int, timeout: float) -> bool:
         """The phone sends frames only when the screen changes."""

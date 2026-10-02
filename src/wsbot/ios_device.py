@@ -31,6 +31,7 @@ from .debug import dbg, snap
 from .device import BaseDevice, SafetyError
 from .imgio import imread
 from .log import log
+from .shot import Shot
 
 K = 1.728  # iPhone SE px -> calibration px
 GAME = "in.playsimple.wordsearch"
@@ -264,8 +265,13 @@ class IOSGameDevice(BaseDevice):
     # ---- frames -------------------------------------------------------------
 
     def frame(self) -> np.ndarray:
-        """Latest screen frame in calibration space. The phone sends frames only when
-        the screen changes, so wait briefly for a new one instead of spinning."""
+        """Latest screen frame in calibration space."""
+        return self.shot().calib
+
+    def shot(self) -> Shot:
+        """Latest screen frame at the phone's own size (resized on demand). The phone
+        sends frames only when the screen changes, so wait briefly for a new one
+        instead of spinning; an unchanged screen keeps its sequence number."""
         if not self.phone.alive:
             raise RuntimeError("iPhone USB session is down")
         self.phone.wait_newer(self._seq, 0.1)
@@ -278,7 +284,7 @@ class IOSGameDevice(BaseDevice):
                     self._locate_topbar(img)
                 except Exception as exc:
                     log("ERROR", f"top bar search failed: {exc!r}")
-        return cv2.resize(img, self.calib, interpolation=cv2.INTER_LINEAR)
+        return Shot(self._seq, img, self.calib)
 
     def peek(self, box: tuple[int, int, int, int], scale: float) -> tuple[np.ndarray, float]:
         """Part of the newest frame (calib box x0,y0,x1,y1) at `scale`, and when it

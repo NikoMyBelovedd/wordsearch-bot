@@ -13,7 +13,16 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SERIAL = "ios"  # the iPhone over USB; --serial picks an adb device
 
 
+def _one_thread_each() -> None:
+    """A farm runs one bot per phone: OpenCV's per-call worker threads (one per core,
+    in every bot) only add switching. One each unless WSBOT_THREADS says otherwise."""
+    import cv2
+
+    cv2.setNumThreads(int(os.environ.get("WSBOT_THREADS") or 1))
+
+
 def main() -> None:
+    _one_thread_each()
     p = argparse.ArgumentParser(prog="wsbot", description="Word Search Explorer auto-solver")
     p.add_argument(
         "--serial",

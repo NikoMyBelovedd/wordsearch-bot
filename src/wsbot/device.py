@@ -18,9 +18,9 @@ import time
 
 import cv2
 import numpy as np
-import uiautomator2 as u2
 
 from .log import log
+from .shot import Shot
 
 CALIB_W, CALIB_H = 1080, 2400
 U2_TIMEOUT_S = 2.5
@@ -123,6 +123,12 @@ class BaseDevice:
         """The latest frame may not show the screen as it is now (iOS stream hiccup)."""
         return False
 
+    def shot(self) -> Shot:
+        """The current screen, sized on demand. Backends that number their frames
+        override this so an unchanged screen costs nothing."""
+        self.__dict__["_shot_seq"] = seq = self.__dict__.get("_shot_seq", 0) + 1
+        return Shot(seq, self.frame(), self.calib)
+
     def close(self) -> None:
         pass
 
@@ -141,6 +147,8 @@ class Device(BaseDevice):
         self.serial = serial
         self.dry_run = dry_run
         self.input_lock = threading.Lock()
+        import uiautomator2 as u2  # Android only: an iPhone bot needn't load it (~20 MB)
+
         self.d = u2.connect(serial)
         self.shell = ShellInput(serial)
         self._u2_busy = threading.Event()
@@ -168,6 +176,8 @@ class Device(BaseDevice):
         log("RECOVERY", f"reconnecting to {self.serial}")
         try:
             self.adb("wait-for-device", timeout=60)
+            import uiautomator2 as u2
+
             self.d = u2.connect(self.serial)
         except Exception as exc:
             log("ERROR", f"reconnect failed: {exc!r}")
