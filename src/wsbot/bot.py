@@ -86,6 +86,7 @@ TOAST_EATS_S = 0.1
 POPUP_EATS_S = 0.75
 LEARN_PASSES = ("exhaustive", "slow")
 LEARN_MIN_LEN = 4
+LEARN_MAX = 16  # more lines than this fit what lit up: a misread frame, learn nothing
 LEARNED_RANK = 1_000  # learned theme words go early in the fast pass
 
 
@@ -516,7 +517,11 @@ class Bot:
             words = self._learned_path.read_text(encoding="utf-8").split()
         except OSError:
             return
-        for w in words:
+        # Before learn-1 the learner kept only the longest of nested lines, so a theme
+        # word next to a found letter was saved with that letter (FKICKBOARD, WALKMANR,
+        # SSORROWFUL) and the word itself stayed unknown. Try each one-letter trim too.
+        trims = [t for w in words for t in (w[1:], w[:-1]) if len(t) >= LEARN_MIN_LEN]
+        for w in words + trims:
             if w not in self.words.rank:
                 self.words.add(w, LEARNED_RANK)
         log("WORDS", f"{len(words)} learned theme words")
@@ -551,6 +556,7 @@ class Bot:
                 return
         fresh = lit - lit_before
         g = self.grid
+        dbg(f"learn: lit before {sorted(lit_before)}, after {sorted(lit)}")  # for replays
         # In the main log: the cells a late pass lit spell the word it finally found,
         # which tells why the earlier passes missed it.
         log(
@@ -560,24 +566,30 @@ class Bot:
         )
         # A found word lights exactly its own cells, so the line must cover a whole lit
         # run: a piece of a longer find (MOAR inside a found row) has lit cells beyond an
-        # end. And it must not be a known word (either way round: PMET = TEMP) plus one
-        # cell another find lit (ELANDING = LANDING + the E of STEP's row).
+        # end. A known word (either way round: PMET = TEMP) is nothing to learn, but a
+        # known word plus a letter can be the find: MIGRATORY (MIGRATOR is known) and
+        # SIBERIA (IBERIA) were each missed again on the next board with that theme,
+        # ~30 s each time. When it's junk instead (ELANDING = LANDING + the E of STEP's
+        # row) it costs one swipe on boards that have that line.
         keep = [
             h
             for h in self.pass_fired
             if len(h.word) >= LEARN_MIN_LEN
-            and not self._known_inside(h.word)
+            and not self._known(h.word)
             and not self._known_outside(h)
             and set(path_cells(h)) <= lit
             and sum(c not in fresh for c in path_cells(h)) <= 2
             and _whole_run(h, fresh)
         ]
         # Up to 2 cells may have been lit before: theme words cross found ones
-        # (PORCUPINE's E was BULLET's). Then the line minus that end qualifies too
-        # (PORCUPIN, NETBAL inside NETBALL): keep only the longest line.
-        keep = _drop_ambiguous(keep)
+        # (PORCUPINE's E was BULLET's). Then other lines fit the same new cells (the line
+        # minus that end, or shifted onto another found letter), and which one is the
+        # word can't be told. Learn them all: a junk line costs one swipe on a board that
+        # has it, a missed word the next board's exhaustive pass (~30 s). Keeping only
+        # the longest saved WOODBLOCKE, not WOODBLOCK; skipping partly overlapping ones
+        # lost SIBERIA (CAIREBI fit too), twice in one morning.
         words = sorted({h.word for h in keep})
-        if not words or len(words) > 8:
+        if not words or len(words) > LEARN_MAX:
             return
         # Most of what lit up must be these lines: a level-end flash or a misread frame
         # lights cells everywhere, and learning from that would teach junk.
@@ -595,9 +607,8 @@ class Bot:
             log("WARN", f"couldn't save learned words: {exc!r}")
         log("WORDS", f"learned {', '.join(words)}")
 
-    def _known_inside(self, word: str) -> bool:
-        rank = self.words.rank
-        return any(v in rank for w in (word, word[::-1]) for v in (w, w[1:], w[:-1]))
+    def _known(self, word: str) -> bool:
+        return word in self.words.rank or word[::-1] in self.words.rank
 
     def _known_outside(self, hit: Hit) -> bool:
         """The line one cell longer at either end is a known word (DRAGONFL: the Y of
@@ -1072,19 +1083,6 @@ def _subwords_last(hits: list[Hit]) -> list[Hit]:
     return [h for h, i in zip(hits, inside, strict=True) if not i] + [
         h for h, i in zip(hits, inside, strict=True) if i
     ]
-
-
-def _drop_ambiguous(hits: list[Hit]) -> list[Hit]:
-    """Learning candidates minus lines inside a longer one (NETBAL in NETBALL). Two that
-    only partly overlap (ITIND, TINDY around 3 new cells) can't both be the find, and
-    which one is can't be told: learn neither."""
-    cells = [frozenset(path_cells(h)) for h in hits]
-    keep = [h for h, c in zip(hits, cells, strict=True) if not any(c < o for o in cells)]
-    kept = {frozenset(path_cells(h)) for h in keep}
-    if any(a != b and a & b for a in kept for b in kept):
-        dbg(f"learn: skipped {sorted(h.word for h in keep)}: overlapping lines")
-        return []
-    return keep
 
 
 def _mostly_unlit(hit: Hit, lit: set[tuple[int, int]]) -> bool:
