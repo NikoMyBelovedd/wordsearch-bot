@@ -334,7 +334,7 @@ def test_change_scan_finds_what_a_whole_search_finds():
             x, y = rng.integers(100, 900), rng.integers(700, 1300)  # not over the popup
             img[y : y + 90, x : x + 260] = rng.integers(60, 255, 3)
         shot = Shot(step, native_of(img), CALIB)
-        scan.begin(shot.coarse_color, shot.small)
+        scan.begin(shot.coarse_color)
         if step >= 8:
             assert not scan.changed.any()
         elif step not in (0, 2, 5, 7):  # a few cells changed, not the whole screen
@@ -401,7 +401,7 @@ def test_change_scan_keeps_scores_only_for_the_same_pixels(monkeypatch):
 
     def full_scan(native):
         shot = Shot(1, native, CALIB)
-        scan.begin(shot.coarse_color, shot.small)
+        scan.begin(shot.coarse_color)
         calls.clear()
         return [
             watcher_mod.match(shot.small, p, shot.coarse_as(p.coarse_look), scan) for p in popups
@@ -410,6 +410,7 @@ def test_change_scan_keeps_scores_only_for_the_same_pixels(monkeypatch):
     first = full_scan(native_of(img))
     assert len(calls) == 2 * len(popups)  # whole maps + color scores
     assert full_scan(native_of(img)) == first and not calls  # a still screen: all kept
+    assert full_scan(native_of(img)) == first and not calls  # and on, while it stays
     noisy = native_of(img).astype(np.int16) + np.random.default_rng(1).integers(
         -2, 3, (1334, 750, 3)
     )

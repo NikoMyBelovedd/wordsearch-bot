@@ -94,7 +94,7 @@ def main() -> None:
             coarse = timed("coarse", lambda s=small: (None, watcher.coarse_frame(s)))
         scores = {}
         if scan is not None:
-            timed("change_mask", lambda s=s: scan.begin(s.coarse_color, s.small))
+            timed("change_mask", lambda s=s: scan.begin(s.coarse_color))
         look_of = (
             (lambda p, sh=s: sh.coarse_as(p.coarse_look))
             if shot is not None

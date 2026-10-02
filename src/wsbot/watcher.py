@@ -198,7 +198,7 @@ class ChangeScan:
     map from the last full scan, and only the spots whose template-sized window covers
     a changed pixel are scored again. The color score that decides a match (match())
     is taken at the best spot of that map, and taken again unless the pixels it looks
-    at are exactly those of the last full scan (a still screen's video frames repeat
+    at are exactly those it was last taken on (a still screen's video frames repeat
     unchanged areas bit for bit), so a kept score is the score of this picture.
 
     "Changed" tolerates video noise: a pixel counts once any channel moved more than
@@ -216,15 +216,13 @@ class ChangeScan:
         self.scan = 0  # full scans so far
         self.changed: np.ndarray | None = None  # changed tiles this scan; None = all
         self.maps: dict[str, tuple[int, np.ndarray]] = {}  # name -> (scan, score map)
-        self.small: np.ndarray | None = None  # this scan's half-res frame, and the last's
-        self.last_small: np.ndarray | None = None
-        # name -> (scan, window, match() result) of its color score
-        self.scores: dict[str, tuple[int, tuple[int, int, int, int], tuple]] = {}
+        # name -> (box, its half-res pixels, match() result) of its last color score:
+        # the result depends on nothing else (only these pixels are kept, not frames)
+        self.scores: dict[str, tuple[tuple[int, int, int, int], np.ndarray, tuple]] = {}
 
-    def begin(self, coarse_color: np.ndarray, small: np.ndarray | None = None) -> None:
-        """Start a full scan of this picture (`Shot.coarse_color`, `Shot.small`)."""
+    def begin(self, coarse_color: np.ndarray) -> None:
+        """Start a full scan of this picture (`Shot.coarse_color`)."""
         self.scan += 1
-        self.last_small, self.small = self.small, small
         ref = self.ref
         if ref is None or ref.shape != coarse_color.shape:
             self.ref, self.changed = coarse_color.copy(), None
@@ -246,24 +244,20 @@ class ChangeScan:
         self.maps.pop(name, None)
         self.scores.pop(name, None)
 
-    def kept(self, name: str, small: np.ndarray, box: tuple[int, int, int, int]):
-        """The last full scan's match() result for this window of `small`, if the
-        window shows exactly the same pixels as it did then."""
+    def kept(self, name: str, box: tuple[int, int, int, int], window: np.ndarray):
+        """The match() result last taken at `box`, if `window` (the half-res pixels
+        there) is exactly what it was taken on."""
         last = self.scores.get(name)
-        prev = self.last_small
-        if last is None or last[0] != self.scan - 1 or last[1] != box or small is not self.small:
+        if last is None or last[0] != box or not np.array_equal(last[1], window):
             return None
-        if prev is None or prev.shape != small.shape:
-            return None
-        x0, y0, x1, y1 = box
-        return last[2] if np.array_equal(prev[y0:y1, x0:x1], small[y0:y1, x0:x1]) else None
+        return last[2]
 
-    def keep(self, name: str, box: tuple[int, int, int, int], result: tuple) -> None:
-        self.scores[name] = (self.scan, box, result)
+    def keep(self, name: str, box: tuple[int, int, int, int], window: np.ndarray, result) -> None:
+        self.scores[name] = (box, window.copy(), result)
 
     def spot(self, popup: Popup, coarse: np.ndarray) -> tuple[int, int]:
-        """The template's best quarter-res spot in this scan's picture, as
-        cv2.minMaxLoc over a whole cv2.matchTemplate of `coarse` would find it."""
+        """The template's best quarter-res spot in this scan's picture: cv2.minMaxLoc
+        over its score map, where spots that saw no change keep their last score."""
         tmpl = popup.coarse
         th, tw = tmpl.shape[:2]
         kept = self.maps.get(popup.name)
@@ -335,16 +329,16 @@ def match(
         ox, oy = max(0, 2 * qx - REFINE_PAD), max(0, 2 * qy - REFINE_PAD)
         x1, y1 = min(w, 2 * qx + tw + REFINE_PAD), min(h, 2 * qy + th + REFINE_PAD)
         box = (ox, oy, x1, y1)
-        if scan is not None and (kept := scan.kept(popup.name, small_frame, box)) is not None:
-            return kept
         small_frame = small_frame[oy:y1, ox:x1]
+        if scan is not None and (kept := scan.kept(popup.name, box, small_frame)) is not None:
+            return kept
     res = cv2.matchTemplate(small_frame, popup.template, cv2.TM_CCOEFF_NORMED)
     _, score, _, loc = cv2.minMaxLoc(res)
     loc = (loc[0] + ox, loc[1] + oy)
     cx, cy = (loc[0] + tw / 2) / SCALE, (loc[1] + th / 2) / SCALE
     result = float(score), (round(cx), round(cy))
     if scan is not None and box is not None:
-        scan.keep(popup.name, box, result)
+        scan.keep(popup.name, box, small_frame, result)
     return result
 
 
@@ -540,7 +534,7 @@ class PopupWatcher(threading.Thread):
         if full:
             self._last_full, self._full_shot = now, shot
             try:
-                self._changes.begin(shot.coarse_color, shot.small)
+                self._changes.begin(shot.coarse_color)
             except Exception as exc:  # start over: score every template whole
                 log("ERROR", f"change scan failed: {exc!r}")
                 self._changes = ChangeScan()
