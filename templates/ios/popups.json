@@ -4,6 +4,8 @@
     "file": "ios_dont_allow.png",
     "threshold": 0.88,
     "cooldown": 2.0,
+    "holdoff": 1.5,
+    "allow": "ios_alert",
     "system": true
   },
   {

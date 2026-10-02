@@ -16,6 +16,7 @@ into them. Registry: templates/popups.json, where list order is priority order.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -28,6 +29,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from . import sysalert
 from .board import covered_below
 from .debug import dbg, snap, snap_due
 from .device import Device
@@ -102,6 +104,23 @@ UNKNOWN_GIVE_UP_S = 120.0
 RELAUNCH_COOLDOWN_S = 30.0  # home screen seen again right after a relaunch: give it time
 UNKNOWN_DUMP_MIN_S = 10.0  # unknown screens are saved once each, at most this often
 UNKNOWN_SAME = 6.0  # thumbnails this close (mean abs difference) are the same screen
+# The iPhone's own alerts (see sysalert.py): looked for this often while the board isn't
+# in view (~10 ms a look); acted on once one has sat still this long (it fades and
+# zooms in), at most every ALERT_TAP_GAP_S, and never within ALERT_HOLDOFF_S of any
+# other tap; one that is still there after ALERT_MAX_TAPS taps is left to the
+# unknown-screen recovery. Its labels are read again before every tap.
+ALERT_EVERY_S = 0.5
+ALERT_SETTLE_S = 0.6
+ALERT_TAP_GAP_S = 2.5
+ALERT_HOLDOFF_S = 1.5
+ALERT_MAX_TAPS = 3
+ALERT_SAME = 8.0  # mean abs difference of two 48x24 looks at the box: the same alert
+TRUST_LOG_EVERY_S = 600.0
+# Notification banners over the top of the screen: a no-tap zone while one is up (a tap
+# opens the app that sent it), plus this long after it was last seen (it slides away).
+BANNER_EVERY_S = 0.3
+BANNER_LINGER_S = 0.8
+BANNER_PAD = 16  # calibration px around the banner's box
 
 
 def board_visible_in(shot: Shot, expected: tuple[int, int, int, int] | None) -> bool:
@@ -161,6 +180,26 @@ class Popup:
     coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
     streak: int = 0
+
+
+@dataclass
+class SeenAlert:
+    """An iPhone system alert on screen (see PopupWatcher._check_alert)."""
+
+    alert: sysalert.Alert  # boxes in the phone's own px (Shot.native)
+    zone: tuple[int, int, int, int]  # its box in calibration px
+    look: np.ndarray  # 48x24 gray of the box: still the same alert?
+    since: float  # when it showed (or was last tapped): it settles from here
+    choice: sysalert.Choice | None = None  # None = labels not read (yet / since the tap)
+    taps: int = 0
+    last_tap: float = 0.0
+    gave_up: bool = False
+
+
+def _alert_look(img: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    x0, y0, x1, y1 = box
+    crop = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    return cv2.resize(crop, (48, 24), interpolation=cv2.INTER_AREA).astype(np.int16)
 
 
 def load_popups(folder: Path) -> list[Popup]:
@@ -483,6 +522,19 @@ class PopupWatcher(threading.Thread):
         self._esc_t = 0.0
         self._esc_relaunches: deque[float] = deque(maxlen=8)
         self._last_relaunch = 0.0
+        # The iPhone's own alerts and notification banners (sysalert.py)
+        self._sys_ui = getattr(device, "platform", "ios") == "ios"
+        self.alert: SeenAlert | None = None
+        self._alert_check = 0.0
+        self._alert_shot: Shot | None = None
+        self._trust_logged = -TRUST_LOG_EVERY_S
+        self._no_ocr_logged = False
+        self._alert_dump = -60.0
+        self._banner_check = 0.0
+        self._banner_shot: Shot | None = None
+        self._banner_found = False
+        self._banner_seen = 0.0
+        self._banner_zone = False
 
     # ---- API for the main thread -------------------------------------------
 
@@ -599,10 +651,14 @@ class PopupWatcher(threading.Thread):
         # (a static Bonus Words popup sat 40 s until "game hung" restarted the game).
         if fresh or (self._full_shot is not shot and self._full_due(now)):
             self._score(shot, now)
-        matched = self._handle_popups(now)
+        # Before the game's buttons: an alert's no-tap zone must be up before any tap
+        alert = self._sys_ui and self._check_system_ui(shot, now)
+        # Under an iPhone alert the game's own buttons still match (dimmed), but taps
+        # can't reach them and they're no proof of anything: only the phone's own count.
+        matched = self._handle_popups(now, system_only=self.alert is not None)
         if self.board_visible:
             self.last_known = now
-        if matched or self.board_visible:
+        if matched or self.board_visible or alert:
             self._hidden_since = None
         else:
             self._check_unknown(shot, now)
@@ -670,12 +726,16 @@ class PopupWatcher(threading.Thread):
                     shot.small, popup, self._scores[popup.name]
                 )
 
-    def _handle_popups(self, now: float) -> bool:
+    def _handle_popups(self, now: float, *, system_only: bool = False) -> bool:
         """Act on the highest-priority popup that is on screen. True if any matched.
-        Runs every tick; an unchanged picture keeps its scores from _score."""
+        Runs every tick; an unchanged picture keeps its scores from _score.
+        system_only: only the phone's own screens (an iPhone alert is up)."""
         hit = None
         scores = []
         for popup in self._looked:
+            if system_only and not (popup.system or popup.avoid):
+                popup.streak, popup.seen_since = 0, 0.0
+                continue
             score, center = self._scores[popup.name]
             scores.append((score, popup.name, center))
             if popup.covers and score >= popup.threshold and not self._eye_on:
@@ -829,6 +889,170 @@ class PopupWatcher(threading.Thread):
         imwrite(path, shot.calib)
         log("WARN", f"board hidden {hidden:.0f}s with no known popup -> saved {path.name}")
 
+    # ---- the iPhone's own alerts and banners ------------------------------------------
+
+    def _check_system_ui(self, shot: Shot, now: float) -> bool:
+        """Notification banners: a no-tap zone while one is up. System alerts: tap a safe
+        button (sysalert.SAFE_LABELS) or none. True while an alert is on screen that the
+        watcher is handling (so it isn't an unknown screen)."""
+        try:
+            self._check_banner(shot, now)
+        except Exception as exc:
+            log("ERROR", f"banner check failed: {exc!r}")
+        try:
+            return self._check_alert(shot, now)
+        except Exception as exc:
+            log("ERROR", f"alert check failed: {exc!r}")
+            return False
+
+    @staticmethod
+    def _to_calib(shot: Shot, *xy: int) -> tuple[int, ...]:
+        h, w = shot.native.shape[:2]
+        sx, sy = shot.calib_size[0] / w, shot.calib_size[1] / h
+        return tuple(round(v * (sx if i % 2 == 0 else sy)) for i, v in enumerate(xy))
+
+    def _check_banner(self, shot: Shot, now: float) -> None:
+        """A banner over the top of the game is waited out: swipes on the board go on,
+        taps under it are refused (a tap opens the app that sent it)."""
+        if shot is self._banner_shot:
+            if self._banner_found:
+                self._banner_seen = now  # the same picture: still there
+        elif now - self._banner_check >= BANNER_EVERY_S:
+            self._banner_check, self._banner_shot = now, shot
+            box = sysalert.find_banner(shot.native)
+            self._banner_found = box is not None
+            if box is not None:
+                x0, y0, x1, y1 = self._to_calib(shot, *box)
+                p = BANNER_PAD
+                zone = (x0 - p, y0 - p, x1 + p, y1 + p)
+                if not self._banner_zone:
+                    log(
+                        "WATCHER",
+                        f"notification banner on the iPhone: no taps in {zone} until it goes",
+                    )
+                self._banner_seen, self._banner_zone = now, True
+                self.device.set_dynamic_zone("ios_banner", zone)
+        if self._banner_zone and now - self._banner_seen > BANNER_LINGER_S:
+            self._banner_zone = False
+            self.device.set_dynamic_zone("ios_banner", None)
+
+    def _check_alert(self, shot: Shot, now: float) -> bool:
+        if self.board_visible:  # an alert dims the whole screen: the board can't be in view
+            self._drop_alert()
+            return False
+        if shot is not self._alert_shot and now - self._alert_check >= ALERT_EVERY_S:
+            self._alert_check, self._alert_shot = now, shot
+            self._see_alert(shot, now, sysalert.find_alert(shot.native))
+        seen = self.alert
+        if seen is None:
+            return False
+        # The phone's, not the game's: no blind taps (one could hit "Allow"), and the
+        # board hidden under it isn't the level ending.
+        self.system_seen = self.mid_level_seen = self.last_match = now
+        if seen.gave_up:
+            return False
+        if now - seen.since < ALERT_SETTLE_S:
+            return True
+        if seen.choice is None:
+            seen.choice = self._read_alert(self._alert_shot or shot, seen, now)
+        if seen.choice.button is None:
+            return False  # nothing safe to tap: an unknown screen (saved once, recovery)
+        if now - seen.last_tap < ALERT_TAP_GAP_S or now - self._last_tap < ALERT_HOLDOFF_S:
+            return True
+        if seen.taps >= ALERT_MAX_TAPS:
+            seen.gave_up = True
+            log(
+                "WARN",
+                f"iPhone alert still up after {seen.taps} taps on {seen.choice.label!r}; "
+                "leaving it to the unknown-screen recovery",
+            )
+            return False
+        x, y = self._to_calib(self._alert_shot or shot, *seen.alert.center(seen.choice.button))
+        label = seen.choice.label
+        seen.taps += 1
+        seen.last_tap = seen.since = now
+        seen.choice = None  # read it again before any other tap: it may be a new alert
+        self.last_action = self._last_tap = now
+        self.hits[f"ios_alert:{label}"] += 1
+        self.device.tap(x, y, why=f"iPhone alert: {label}", allow="ios_alert")
+        return True
+
+    def _see_alert(self, shot: Shot, now: float, found: sysalert.Alert | None) -> None:
+        if found is None:
+            self._drop_alert()
+            return
+        look = _alert_look(shot.native, found.box)
+        zone = self._to_calib(shot, *found.box)
+        seen = self.alert
+        if (
+            seen is None
+            or len(seen.alert.buttons) != len(found.buttons)
+            or any(abs(a - b) > 12 for a, b in zip(seen.zone, zone, strict=True))
+            or np.abs(seen.look - look).mean() > ALERT_SAME
+        ):
+            self.alert = SeenAlert(found, zone, look, now)  # a new one (or it moved): settle
+        else:
+            found.labels, found.title = seen.alert.labels, seen.alert.title
+            seen.alert, seen.zone, seen.look = found, zone, look
+        # No other tap inside it (a game button under it, a blind clear tap): only the
+        # alert's own safe button, which names this zone.
+        self.device.set_dynamic_zone("ios_alert", zone)
+
+    def _drop_alert(self) -> None:
+        if self.alert is not None:
+            self.alert = None
+            self.device.set_dynamic_zone("ios_alert", None)
+
+    def _read_alert(self, shot: Shot, seen: SeenAlert, now: float) -> sysalert.Choice:
+        """OCR the alert and choose a button (or none), with one log line."""
+        from .letters import TESSERACT
+
+        a = seen.alert
+        if TESSERACT is None:
+            if not self._no_ocr_logged:
+                self._no_ocr_logged = True
+                log(
+                    "WARN",
+                    "iPhone alert on screen, but Tesseract isn't installed to read it: no tap",
+                )
+            return sysalert.Choice(None, "Tesseract isn't installed")
+        try:
+            a.labels = sysalert.read_labels(shot.native, a)
+            a.title = sysalert.read_title(shot.native, a)
+        except Exception as exc:
+            log("ERROR", f"reading the iPhone alert failed: {exc!r}")
+            return sysalert.Choice(None, "unreadable")
+        choice = sysalert.choose(a.labels, a.title)
+        buttons = " | ".join(s or "?" for s in a.labels)
+        if choice.trust and now - self._trust_logged >= TRUST_LOG_EVERY_S:
+            self._trust_logged = now
+            log(
+                "WARN",
+                'The iPhone asks "Trust This Computer?". A person must tap Trust on the phone '
+                "and enter its passcode; the bot never taps it.",
+            )
+        what = (
+            f"tapping {choice.label!r}"
+            if choice.button is not None
+            else f"not tapping ({choice.label}); left to the unknown-screen recovery"
+        )
+        log("WATCHER", f'iPhone alert "{a.title}" [{buttons}]: {what}')
+        if choice.button is not None and seen.taps == 0 and now - self._alert_dump >= 60:
+            # One picture per tapped alert, to check later what was read and tapped (one
+            # with nothing safe is saved as an unknown screen)
+            self._alert_dump = now
+            name = f"ios_alert_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            with contextlib.suppress(Exception):
+                imwrite(self.diagnostics / name, shot.calib)
+        return choice
+
+    def alert_note(self) -> str:
+        """The alert on screen, for an error message ("" if none)."""
+        a = self.alert.alert if self.alert is not None else None
+        if a is None or not a.labels:
+            return ""
+        return f' (an iPhone alert it may not tap: "{a.title}" [{" | ".join(a.labels)}])'
+
     # ---- not in the game / stuck ------------------------------------------------
 
     def _relaunch_game(self, why: str, *, force: bool = False) -> None:
@@ -885,8 +1109,8 @@ class PopupWatcher(threading.Thread):
         elif self._esc_step == 2 and now - self._esc_t >= UNKNOWN_GIVE_UP_S:
             self._esc_step = 3
             self._fatal(
-                f"stuck on a screen it doesn't know for {unknown / 60:.0f} min; "
-                "stopping so the bot can be restarted"
+                f"stuck on a screen it doesn't know for {unknown / 60:.0f} min"
+                f"{self.alert_note()}; stopping so the bot can be restarted"
             )
 
     def _fatal(self, message: str) -> None:

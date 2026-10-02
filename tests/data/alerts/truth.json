@@ -1,0 +1,298 @@
+{
+ "se_notifications_dark": {
+  "buttons": [
+   "Don't Allow",
+   "Allow"
+  ],
+  "centers": [
+   [
+    227,
+    807
+   ],
+   [
+    522,
+    807
+   ]
+  ],
+  "tap": "Don't Allow",
+  "tap_center": [
+   227,
+   807
+  ]
+ },
+ "se_low_battery_light": {
+  "buttons": [
+   "Close",
+   "Low Power Mode"
+  ],
+  "centers": [
+   [
+    375,
+    689
+   ],
+   [
+    375,
+    801
+   ]
+  ],
+  "tap": "Close",
+  "tap_center": [
+   375,
+   689
+  ]
+ },
+ "se_update_stacked_dark": {
+  "buttons": [
+   "Install Tonight",
+   "Remind Me Later",
+   "Details"
+  ],
+  "centers": [
+   [
+    375,
+    653
+   ],
+   [
+    375,
+    765
+   ],
+   [
+    375,
+    877
+   ]
+  ],
+  "tap": "Remind Me Later",
+  "tap_center": [
+   375,
+   765
+  ]
+ },
+ "se_update_row_light": {
+  "buttons": [
+   "Later",
+   "Install Now"
+  ],
+  "centers": [
+   [
+    227,
+    765
+   ],
+   [
+    522,
+    765
+   ]
+  ],
+  "tap": "Later",
+  "tap_center": [
+   227,
+   765
+  ]
+ },
+ "se_trust_light": {
+  "buttons": [
+   "Trust",
+   "Don't Trust"
+  ],
+  "centers": [
+   [
+    227,
+    785
+   ],
+   [
+    522,
+    785
+   ]
+  ],
+  "tap": null,
+  "tap_center": null
+ },
+ "se_settings_ok_dark": {
+  "buttons": [
+   "Settings",
+   "OK"
+  ],
+  "centers": [
+   [
+    227,
+    739
+   ],
+   [
+    522,
+    739
+   ]
+  ],
+  "tap": null,
+  "tap_center": null
+ },
+ "se_single_ok_light": {
+  "buttons": [
+   "OK"
+  ],
+  "centers": [
+   [
+    375,
+    717
+   ]
+  ],
+  "tap": "OK",
+  "tap_center": [
+   375,
+   717
+  ]
+ },
+ "se_tracking_stacked_dark": {
+  "buttons": [
+   "Ask App Not to Track",
+   "Allow"
+  ],
+  "centers": [
+   [
+    375,
+    705
+   ],
+   [
+    375,
+    817
+   ]
+  ],
+  "tap": "Ask App Not to Track",
+  "tap_center": [
+   375,
+   705
+  ]
+ },
+ "se_update_required_dark": {
+  "buttons": [
+   "Update"
+  ],
+  "centers": [
+   [
+    375,
+    745
+   ]
+  ],
+  "tap": null,
+  "tap_center": null
+ },
+ "tall_notifications_light": {
+  "buttons": [
+   "Don't Allow",
+   "Allow"
+  ],
+  "centers": [
+   [
+    382,
+    1521
+   ],
+   [
+    824,
+    1521
+   ]
+  ],
+  "tap": "Don't Allow",
+  "tap_center": [
+   382,
+   1521
+  ]
+ },
+ "tall_low_battery_stacked_dark": {
+  "buttons": [
+   "Low Power Mode",
+   "Close"
+  ],
+  "centers": [
+   [
+    603,
+    1344
+   ],
+   [
+    603,
+    1512
+   ]
+  ],
+  "tap": "Close",
+  "tap_center": [
+   603,
+   1512
+  ]
+ },
+ "tall_trust_dark": {
+  "buttons": [
+   "Trust",
+   "Don't Trust"
+  ],
+  "centers": [
+   [
+    382,
+    1488
+   ],
+   [
+    824,
+    1488
+   ]
+  ],
+  "tap": null,
+  "tap_center": null
+ },
+ "tall_not_now_light": {
+  "buttons": [
+   "Not Now",
+   "Settings"
+  ],
+  "centers": [
+   [
+    382,
+    1458
+   ],
+   [
+    824,
+    1458
+   ]
+  ],
+  "tap": "Not Now",
+  "tap_center": [
+   382,
+   1458
+  ]
+ },
+ "se_banner_light": {
+  "banner": [
+   16,
+   16,
+   734,
+   164
+  ],
+  "frame": "board_readable",
+  "tall": false
+ },
+ "se_banner_dark": {
+  "banner": [
+   16,
+   16,
+   734,
+   164
+  ],
+  "frame": "board_readable",
+  "tall": false
+ },
+ "se_banner_two_lines_light": {
+  "banner": [
+   16,
+   16,
+   734,
+   204
+  ],
+  "frame": "board_readable",
+  "tall": false
+ },
+ "tall_banner_light": {
+  "banner": [
+   24,
+   168,
+   1182,
+   390
+  ],
+  "frame": "board_readable",
+  "tall": true
+ }
+}

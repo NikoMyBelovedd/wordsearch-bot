@@ -5,6 +5,7 @@ tests/data/screens/*.jpg are real frames at the phone's size (750x1334)."""
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import cv2
@@ -182,7 +183,15 @@ class Clock:
 def clock(monkeypatch):
     c = Clock()
     monkeypatch.setattr(watcher_mod.time, "monotonic", c)
-    monkeypatch.setattr(watcher_mod.time, "sleep", lambda s: None)
+    # watcher_mod.time is the time module: a no-op sleep for every thread turned other
+    # tests' leftover background loops (time.sleep(10)) into busy loops (tests 100x slower)
+    real_sleep = watcher_mod.time.sleep
+    main = threading.main_thread()
+    monkeypatch.setattr(
+        watcher_mod.time,
+        "sleep",
+        lambda s: None if threading.current_thread() is main else real_sleep(s),
+    )
     return c
 
 
