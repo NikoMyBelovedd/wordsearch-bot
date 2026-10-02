@@ -386,8 +386,9 @@ def test_full_scans_rescore_a_popup_pasted_on_a_still_screen(tmp_path, monkeypat
     assert not w.device.taps
     now[0] += 1.0
     w._tick()
-    want = watcher_mod.match(still.small, w.popups[14], still.coarse)
-    assert w.popups[14].name == "got_it" and w._scores["got_it"] == want
+    got_it = next(p for p in w.popups if p.name == "got_it")
+    want = watcher_mod.match(still.small, got_it, still.coarse)
+    assert w._scores["got_it"] == want
     assert want[0] >= 0.85 and w.device.taps == [want[1]]
 
 
