@@ -42,7 +42,7 @@ from .board import Board, highlighted
 from .debug import dbg, snap
 from .device import open_device
 from .goal import Goal, local_file, seconds_until_midnight
-from .imgio import imwrite
+from .imgio import MAX_DIAGNOSTICS, imwrite, prune_pngs
 from .instance import acquire as lock_phone
 from .letters import LetterReader
 from .log import log
@@ -51,7 +51,6 @@ from .solver import DIRECTIONS, MIN_LEN, Dictionary, Hit
 from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
-MAX_DIAGNOSTICS = 40  # newest dumps kept (~2 MB each); a 10-day run must not fill the disk
 DUMP_EVERY_S = 300.0  # one dump of a kind this often: a stuck read saved one a second
 # Board gone this long after a pass = the level is over. 3 s, not 1.5: the bonus
 # "Claim" popup fades in over the board ~1 s before the watcher sees it, and 1.5 s
@@ -1017,9 +1016,7 @@ class Bot:
             f"dump {why}: watcher hits={dict(self.watcher.hits)} "
             f"board_visible={self.watcher.board_visible} fps={self.watcher.fps:.1f}"
         )
-        dumps = sorted(self.diagnostics.glob("*.png"), key=lambda p: p.stat().st_mtime)
-        for old in dumps[:-MAX_DIAGNOSTICS]:
-            old.unlink(missing_ok=True)
+        prune_pngs(self.diagnostics, MAX_DIAGNOSTICS)
 
 
 def same_level(a: list[str], b: list[str]) -> bool:

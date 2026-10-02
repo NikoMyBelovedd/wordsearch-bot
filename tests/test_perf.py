@@ -496,3 +496,42 @@ def test_toast_eye_reuses_an_unchanged_box(counted, tmp_path):
     moved[1600 : 1600 + th, 300 : 300 + tw] = 255  # the toast went
     assert w._eye_look(Shot(3, native_of(moved), CALIB), 10.4) < 0.85
     assert len(counted) == 2 and w.cover_seen == 10.2
+
+
+def test_saved_screens_are_pruned_to_the_newest(tmp_path):
+    import os
+
+    from wsbot.imgio import MAX_DIAGNOSTICS, prune_pngs
+
+    for i in range(MAX_DIAGNOSTICS + 5):
+        p = tmp_path / f"unknown_popup_{i:03d}.png"
+        p.write_bytes(b"x")
+        os.utime(p, (1000 + i, 1000 + i))
+    (tmp_path / "notes.txt").write_text("kept")
+    prune_pngs(tmp_path)
+    left = sorted(p.name for p in tmp_path.glob("*.png"))
+    assert left == [f"unknown_popup_{i:03d}.png" for i in range(5, MAX_DIAGNOSTICS + 5)]
+    assert (tmp_path / "notes.txt").exists()
+
+
+def test_unknown_screen_saves_prune_the_folder(tmp_path, monkeypatch):
+    """The watcher's unknown-screen saves keep diagnostics/ at MAX_DIAGNOSTICS too."""
+    import os
+
+    from wsbot.imgio import MAX_DIAGNOSTICS
+
+    for i in range(MAX_DIAGNOSTICS + 5):
+        p = tmp_path / f"old_{i:03d}.png"
+        p.write_bytes(b"x")
+        os.utime(p, (1000 + i, 1000 + i))
+    clock = [1000.0]
+    monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: clock[0])
+    img = np.full((CALIB[1], CALIB[0], 3), (30, 60, 200), np.uint8)  # nothing it knows
+    w = make_watcher([Shot(1, native_of(img), CALIB)], tmp_path)
+    for _ in range(12):
+        w._tick()
+        clock[0] += 1.0
+    pngs = list(tmp_path.glob("*.png"))
+    assert len(pngs) == MAX_DIAGNOSTICS
+    assert any(p.name.startswith("unknown_popup_") for p in pngs)
+    assert not (tmp_path / "old_000.png").exists()

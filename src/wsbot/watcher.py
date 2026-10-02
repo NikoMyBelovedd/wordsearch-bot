@@ -33,7 +33,7 @@ from . import sysalert
 from .board import covered_below
 from .debug import dbg, snap, snap_due
 from .device import Device
-from .imgio import imread, imwrite
+from .imgio import imread, imwrite, prune_pngs
 from .log import log
 from .shot import LOOKS, SCALE, Shot, look
 
@@ -914,6 +914,7 @@ class PopupWatcher(threading.Thread):
         self._last_unknown_dump = now
         path = self.diagnostics / f"unknown_popup_{time.strftime('%Y%m%d_%H%M%S')}.png"
         imwrite(path, shot.calib)
+        prune_pngs(self.diagnostics)
         log("WARN", f"board hidden {hidden:.0f}s with no known popup -> saved {path.name}")
 
     # ---- the iPhone's own alerts and banners ------------------------------------------
@@ -1110,6 +1111,7 @@ class PopupWatcher(threading.Thread):
             name = f"ios_alert_{time.strftime('%Y%m%d_%H%M%S')}.png"
             with contextlib.suppress(Exception):
                 imwrite(self.diagnostics / name, shot.calib)
+                prune_pngs(self.diagnostics)
         return choice
 
     def alert_note(self) -> str:

@@ -22,3 +22,21 @@ def imwrite(path: str | Path, img: np.ndarray) -> bool:
     if ok:
         buf.tofile(str(path))
     return bool(ok)
+
+
+MAX_DIAGNOSTICS = 40  # newest saved screens kept (~2 MB each); a 10-day run must not fill the disk
+
+
+def prune_pngs(folder: Path, keep: int = MAX_DIAGNOSTICS) -> None:
+    """Delete all but the `keep` newest *.png in `folder`. Every writer of saved
+    screens calls it after a save (the bot's dumps, the watcher's unknown screens and
+    alerts): on a phone that shows ads, each ad is a new unknown screen."""
+
+    def mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:  # deleted meanwhile (another thread pruning)
+            return 0.0
+
+    for old in sorted(folder.glob("*.png"), key=mtime)[:-keep]:
+        old.unlink(missing_ok=True)
