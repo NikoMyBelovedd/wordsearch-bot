@@ -95,6 +95,11 @@ BLIND_TAP_WINDOW_S = 20.0
 # A known screen we only wait on (level complete, loading) that stays this long counts
 # as unknown: the game is stuck on it.
 WAIT_STUCK_S = 90.0
+# The same button tapped over and over this long with no board in between counts as
+# unknown too: the game isn't taking the taps (a Bonus "Claim" tapped 317 times in
+# 15 min until AutomationHQ restarted the bot). Normal play has tapped one button
+# for up to ~40 s (Next Level, 20 taps).
+TAP_STUCK_S = 60.0
 # Unknown screen (not the board, nothing known) this long: relaunch the game; still
 # unknown this long after that: restart it and reopen the phone connection; still
 # unknown this long after that: exit with an error so AutomationHQ restarts the bot.
@@ -540,6 +545,10 @@ class PopupWatcher(threading.Thread):
         self._esc_step = 0
         self._esc_t = 0.0
         self._esc_relaunches: deque[float] = deque(maxlen=8)
+        # The button tapped since the board was last seen and when that started (see
+        # TAP_STUCK_S); None after the board or once another button is tapped
+        self._tap_run: tuple[str, float] | None = None
+        self._tap_run_told = False  # this run's warning + saved screen are done
         self._last_relaunch = 0.0
         # The iPhone's own alerts and notification banners (sysalert.py)
         self._sys_ui = getattr(device, "platform", "ios") == "ios"
@@ -601,6 +610,7 @@ class PopupWatcher(threading.Thread):
                 # Nobody looks: nothing is "unknown for long" (a 30 min break read as
                 # "board hidden 1806s" and counted toward giving up)
                 self._hidden_since, self.last_known, self._esc_step = None, time.monotonic(), 0
+                self._tap_run = None
                 self.stop_event.wait(1.0)
                 continue
             if quiet:
@@ -680,6 +690,7 @@ class PopupWatcher(threading.Thread):
         matched = self._handle_popups(now, system_only=self.alert is not None)
         if self.board_visible:
             self.last_known = now
+            self._tap_run = None
         if matched or self.board_visible or alert:
             self._hidden_since = None
         else:
@@ -788,6 +799,8 @@ class PopupWatcher(threading.Thread):
             self.mid_level_seen = now
         if popup.system:
             self.system_seen = now  # not the game: no blind taps, and it's not "known"
+        elif self._tapped_in_vain(popup, now):
+            pass  # not progress: let _escalate relaunch the game
         elif popup.tap or popup.tap_after or now - popup.seen_since < WAIT_STUCK_S:
             self.last_known = now
         # The top match owns this frame even while cooling down or unconfirmed, so a
@@ -817,6 +830,8 @@ class PopupWatcher(threading.Thread):
             if popup.blocking:
                 self.last_action = now
             self._last_tap = now
+            if self._tap_run is None or self._tap_run[0] != popup.name:
+                self._tap_run, self._tap_run_told = (popup.name, now), False
             target = popup.tap_point or center
             if isinstance(target, str):
                 anchor = getattr(self.device, "anchor", lambda _: None)(target.lstrip("@"))
@@ -824,6 +839,27 @@ class PopupWatcher(threading.Thread):
                     log("WARN", f"{popup.name}: anchor {target} not known yet; tapping the match")
                 target = anchor or center
             self.device.tap(*target, why=popup.name, allow=popup.allow)
+        return True
+
+    def _tapped_in_vain(self, popup: Popup, now: float) -> bool:
+        """Has this button been tapped for TAP_STUCK_S with no board in between? Then
+        tapping it isn't getting anywhere. Saves the screen once per run of taps."""
+        run = self._tap_run
+        if run is None or run[0] != popup.name or now - run[1] < TAP_STUCK_S:
+            return False
+        if not self._tap_run_told:
+            self._tap_run_told = True
+            log(
+                "WARN",
+                f"{popup.name} tapped for {now - run[1]:.0f}s and still there: "
+                "the game isn't taking the taps",
+            )
+            shot = self.shot
+            if shot is not None:
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                path = self.diagnostics / f"stuck_tap_{popup.name}_{stamp}.png"
+                imwrite(path, shot.calib)
+                prune_pngs(self.diagnostics)
         return True
 
     def _watch_cover(self) -> None:

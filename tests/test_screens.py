@@ -311,6 +311,38 @@ def test_relaunch_loops_give_up(clock, tmp_path):
     assert len(fatal) == 1 and "lost the game" in fatal[0]
 
 
+def test_a_button_that_never_goes_away_escalates(clock, tmp_path):
+    """A Bonus "Claim" tapped 317 times in 15 min, the game taking none of them: every
+    tap counted as "in the game", so only AutomationHQ's stall check got it out."""
+    w, phone = watcher_on([shot_of("keep_playing", i) for i in range(1, 400)], tmp_path)
+    fatal = []
+    w.on_fatal = fatal.append
+    run(w, clock, watcher_mod.TAP_STUCK_S - 5)
+    assert len(phone.taps) > 10 and phone.launches == 0
+    assert not list(tmp_path.glob("stuck_tap_*"))
+    run(w, clock, 10 + watcher_mod.UNKNOWN_RELAUNCH_S)
+    assert phone.launches == 1  # relaunched about 45 s after the taps stopped counting
+    assert len(list(tmp_path.glob("stuck_tap_keep_playing_*"))) == 1  # saved once
+    run(w, clock, watcher_mod.UNKNOWN_RESTART_S + watcher_mod.UNKNOWN_GIVE_UP_S)
+    assert phone.stops == 1 and len(fatal) == 1  # still there: restart, then give up
+    assert len(list(tmp_path.glob("stuck_tap_*"))) == 1
+
+
+def test_the_board_between_taps_is_progress(clock, tmp_path):
+    """Normal play taps one button for up to ~40 s (Next Level, 20 times) and the board
+    comes back: tapping on and off like that for minutes never escalates."""
+    shots, seq = [], 1
+    for _ in range(6):
+        shots += [shot_of("keep_playing", seq + i) for i in range(40)]
+        shots += [shot_of("board_readable", seq + 40 + i) for i in range(5)]
+        seq += 45
+    w, phone = watcher_on(shots, tmp_path)
+    run(w, clock, 6 * 45)
+    assert len(phone.taps) > 60
+    assert phone.launches == 0 and w._esc_step == 0
+    assert not list(tmp_path.glob("stuck_tap_*"))
+
+
 def test_idle_resets_the_unknown_clock(clock, tmp_path):
     """A 30 min break read as "board hidden 1806s" and would count toward giving up."""
     blank = np.full((1334, 750, 3), (40, 30, 20), np.uint8)
