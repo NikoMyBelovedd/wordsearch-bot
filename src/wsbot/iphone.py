@@ -138,6 +138,8 @@ KEY_RESTART_COOLDOWN_S = 20.0
 # can't reopen within REOPEN_GIVE_UP_S: stop the bot with an error, so AutomationHQ's
 # auto-restart takes over instead of the bot looping silently.
 STREAM_RESTART_FAILS = 3
+# The stream server listens once its first stream start ends (it gives that 25 s)
+LISTEN_WAIT_S = 30.0
 FROZEN_REOPEN_S = 90.0
 REOPEN_GIVE_UP_S = 180.0
 ESCALATION_REOPENS = 2
@@ -706,7 +708,7 @@ class IPhone:
         """The stream server opens its HTTP port only after the phone's stream is up.
         Make sure it is OUR server on self.port: if the port is taken its task dies,
         and reading from the port would show another bot's phone."""
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + LISTEN_WAIT_S
         while time.monotonic() < deadline:
             if task.done():
                 try:
