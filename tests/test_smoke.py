@@ -182,7 +182,7 @@ def test_wordlist_has_the_theme_words_the_old_one_missed():
     words = Dictionary(ROOT / "data" / "words.txt")
     for w in (
         "WATERFALL SANCTUARY WHISPERED SIBERIA MIGRATORY VIRGO OSLO SEOUL PERSIMMON "
-        "SYMBIOTIC SHIPWRECK MILKSHAKE PORCUPINE FACEBOOK WOODBLOCK KICKBOARD"
+        "SYMBIOTIC SHIPWRECK MILKSHAKE PORCUPINE FACEBOOK WOODBLOCK KICKBOARD DONUT"
     ).split():
         assert w in words.rank, w
 

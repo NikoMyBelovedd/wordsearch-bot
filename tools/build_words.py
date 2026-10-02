@@ -7,9 +7,10 @@ SCOWL's size-35 words (everyday spelling: WATERFALL, SANCTUARY, WHISPERED) and m
 place names (SIBERIA, OSLO, VIRGO): theme words like those fell to the exhaustive
 pass, ~30 s a level. Order: the current first 10,000 lines (google-10000, unchanged),
 then SCOWL levels 10..80 (English, American, British, Canadian, Australian words,
-capitalised words and proper names), each level in the old list's order where it had
-the word. Level 95 (and the old list's remaining Scrabble oddities, nearly all of it
-95) only adds junk swipes. SCOWL's licence is in data/SCOWL-LICENSE.txt.
+their common spelling variants such as DONUT, capitalised words and proper names),
+each level in the old list's order where it had the word. Level 95 (and the old
+list's remaining Scrabble oddities, nearly all of it 95) only adds junk swipes.
+SCOWL's licence is in data/SCOWL-LICENSE.txt.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORDS = ROOT / "data" / "words.txt"
 LEVELS = (10, 20, 35, 40, 50, 55, 60, 70, 80)
 NAME = re.compile(
-    r"(english|american|british|canadian|australian)-(words|upper|proper-names)\.(\d+)$"
+    r"(english|american|british|canadian|australian|variant_1|variant_2)"
+    r"-(words|upper|proper-names)\.(\d+)$"
 )
 
 
