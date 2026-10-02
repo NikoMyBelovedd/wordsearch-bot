@@ -422,7 +422,7 @@ def test_banner_checks_wait_for_an_input_near_the_top(clock, tmp_path, monkeypat
     the top looks at what's due and sees the zone the old every-0.3 s check had."""
     looked = []
     real = sysalert.find_banner_in
-    monkeypatch.setattr(sysalert, "find_banner_in", lambda a: looked.append(1) or real(a))
+    monkeypatch.setattr(sysalert, "find_banner_in", lambda *a: looked.append(1) or real(*a))
     shots = shots_of("board_readable", 2) + shots_of("se_banner_light", 10, start=10)
     shots += [Shot(100 + i, frame("board_readable").copy(), SE_CALIB) for i in range(40)]
     w, phone = watcher_on(shots, tmp_path)
@@ -448,3 +448,18 @@ def test_android_has_no_iphone_alert_checks(tmp_path):
     phone.platform = "android"
     w = PopupWatcher(phone, ROOT / "templates" / "ios", "pkg", tmp_path)
     assert not w._sys_ui
+
+
+@pytest.mark.parametrize("name", BANNER_FRAMES + REAL_ALERTS + ["board_readable"])
+def test_the_half_frame_shortcuts_are_the_same_resize(name):
+    """find_alert / find_banner_in reuse Shot.mini on an SE frame: same answers."""
+    img = frame(name)
+    shot = Shot(1, img, calib_of(img))
+    assert sysalert.find_alert(img, shot.mini) == sysalert.find_alert(img)
+    half = sysalert.half_banner_area(img, shot.mini)
+    if img.shape[1] != 750:
+        assert half is None
+        return
+    want, _ = sysalert._shrink(sysalert.banner_area(img))
+    assert np.array_equal(half, want)
+    assert sysalert.find_banner_in(half, img.shape[1]) == sysalert.find_banner(img)

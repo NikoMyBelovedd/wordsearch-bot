@@ -190,7 +190,10 @@ class BannerLook:
     """A banner check that was due (see PopupWatcher._check_banner), done when needed."""
 
     t: float  # the tick it was due at
-    strip: np.ndarray | None  # a copy of the frame's sysalert.banner_area (until looked at)
+    # a copy of the frame's sysalert.banner_area (until looked at), or of it already at
+    # sysalert.NORM_W wide (sysalert.half_banner_area: an iPhone SE's frames)
+    strip: np.ndarray | None
+    shrunk: bool
     native: tuple[int, int]  # the frame's (height, width)
     calib: tuple[int, int]  # its calibration size
     same_t: float  # the last tick that still showed this picture
@@ -963,8 +966,10 @@ class PopupWatcher(threading.Thread):
             elif now - self._banner_check >= BANNER_EVERY_S:
                 self._banner_check, self._banner_shot = now, shot
                 img = shot.native
-                strip = sysalert.banner_area(img).copy()
-                looks.append(BannerLook(now, strip, img.shape[:2], shot.calib_size, now))
+                strip = sysalert.half_banner_area(img, shot.mini)
+                shrunk = strip is not None
+                strip = (strip if shrunk else sysalert.banner_area(img)).copy()
+                looks.append(BannerLook(now, strip, shrunk, img.shape[:2], shot.calib_size, now))
             # A banner last seen longer ago than BANNER_LINGER_S has no zone any more
             while looks and now - looks[0].same_t > BANNER_LINGER_S:
                 looks.popleft()
@@ -984,7 +989,8 @@ class PopupWatcher(threading.Thread):
                 if now - look.same_t > BANNER_LINGER_S:
                     break  # this and every older one: gone too long ago
                 if look.box is False:
-                    look.box = sysalert.find_banner_in(look.strip)
+                    width = look.native[1] if look.shrunk else None
+                    look.box = sysalert.find_banner_in(look.strip, width)
                     look.strip = None
                 if look.box is not None:
                     x0, y0, x1, y1 = self._native_to_calib(look.native, look.calib, *look.box)
@@ -1009,7 +1015,7 @@ class PopupWatcher(threading.Thread):
             return False
         if shot is not self._alert_shot and now - self._alert_check >= ALERT_EVERY_S:
             self._alert_check, self._alert_shot = now, shot
-            self._see_alert(shot, now, sysalert.find_alert(shot.native))
+            self._see_alert(shot, now, sysalert.find_alert(shot.native, shot.mini))
         seen = self.alert
         if seen is None:
             return False

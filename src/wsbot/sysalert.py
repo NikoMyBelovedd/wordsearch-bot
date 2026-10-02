@@ -183,15 +183,31 @@ def _components(small: np.ndarray, min_area: int) -> tuple[np.ndarray, list[_Com
     return labels, comps
 
 
-def _shrink(img: np.ndarray) -> tuple[np.ndarray, float]:
+def _shrink(img: np.ndarray, half: np.ndarray | None = None) -> tuple[np.ndarray, float]:
+    """`img` at NORM_W wide. `half`: `img` already halved (Shot.mini), used when that is
+    the very same resize (an iPhone SE's 750 px frame)."""
     s = NORM_W / img.shape[1]
-    small = cv2.resize(img, (NORM_W, round(img.shape[0] * s)), interpolation=cv2.INTER_AREA)
-    return small, s
+    size = (NORM_W, round(img.shape[0] * s))
+    if half is not None and half.shape[1::-1] == size == (img.shape[1] // 2, img.shape[0] // 2):
+        return half, s
+    return cv2.resize(img, size, interpolation=cv2.INTER_AREA), s
 
 
-def find_alert(img: np.ndarray) -> Alert | None:
-    """An iOS system alert's box and buttons in a BGR screen frame, or None."""
-    small, s = _shrink(img)
+def half_banner_area(img: np.ndarray, half: np.ndarray) -> np.ndarray | None:
+    """_shrink(banner_area(img)) cut from `half` (Shot.mini) when that's exact: a 2x
+    shrink (INTER_AREA averages 2x2 blocks) of an even number of rows. Else None."""
+    rows = banner_area(img).shape[0]
+    if img.shape[1] != 2 * NORM_W or rows % 2 or half.shape[1] != NORM_W:
+        return None
+    if half.shape[0] != img.shape[0] // 2:
+        return None
+    return half[: rows // 2]
+
+
+def find_alert(img: np.ndarray, half: np.ndarray | None = None) -> Alert | None:
+    """An iOS system alert's box and buttons in a BGR screen frame, or None. `half`: the
+    frame halved (Shot.mini), which saves a resize on an iPhone SE."""
+    small, s = _shrink(img, half)
     H, W = small.shape[:2]
     labels, comps = _components(small, 12)
     best = None
@@ -292,9 +308,13 @@ def find_banner(img: np.ndarray) -> tuple[int, int, int, int] | None:
     return find_banner_in(banner_area(img))
 
 
-def find_banner_in(strip: np.ndarray) -> tuple[int, int, int, int] | None:
-    """find_banner, given only the frame's banner_area."""
-    top, s = _shrink(strip)
+def find_banner_in(strip: np.ndarray, width: int | None = None) -> tuple[int, int, int, int] | None:
+    """find_banner, given only the frame's banner_area, or (with the frame's `width`)
+    that area already shrunk to NORM_W (half_banner_area)."""
+    if width is None:
+        top, s = _shrink(strip)
+    else:
+        top, s = strip, NORM_W / width
     W = top.shape[1]
     labels, comps = _components(top, 400)
     for c in comps:
