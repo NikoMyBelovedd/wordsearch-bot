@@ -1,6 +1,6 @@
 """Brute-force every dictionary word on the grid, in wordlist (frequency) order.
 
-words.txt is frequency-ordered (common words first, Scrabble oddities last), so
+words.txt is frequency-ordered (common words first, SCOWL's rarer levels last), so
 sorting hits by line number means real puzzle words get swiped early.
 """
 

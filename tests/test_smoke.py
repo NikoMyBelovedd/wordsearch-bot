@@ -118,7 +118,11 @@ def _learner(tmp_path: Path, grid: list[str], swiped: set[str]):
     from wsbot.bot import Bot, all_lines
 
     bot = Bot.__new__(Bot)
-    bot.words = Dictionary(ROOT / "data" / "words.txt")
+    # the wordlist of the day those levels were played (MIGRATOR, IBERIA in; the theme
+    # words out): the learner is what's under test, not the list
+    known = tmp_path / "words.txt"
+    known.write_text("MIGRATOR\nIBERIA\nCAIR\nBOARD\n")
+    bot.words = Dictionary(known)
     bot.grid = grid
     bot.pass_fired = [h for h in all_lines(grid) if h.word not in swiped]
     bot._learned_path = tmp_path / "learned-words.txt"
@@ -171,3 +175,13 @@ def test_words_saved_with_an_extra_letter_are_tried_trimmed(tmp_path: Path):
     grid = ["XKICKBOARDX", "XXXXXXXXXXX"]
     assert "KICKBOARD" in {h.word for h in bot.words.solve(grid)}
     assert "YOYO" in bot.words.rank
+
+
+def test_wordlist_has_the_theme_words_the_old_one_missed():
+    """The old list (cut at 200,000 lines) lacked these; each cost an exhaustive pass."""
+    words = Dictionary(ROOT / "data" / "words.txt")
+    for w in (
+        "WATERFALL SANCTUARY WHISPERED SIBERIA MIGRATORY VIRGO OSLO SEOUL PERSIMMON "
+        "SYMBIOTIC SHIPWRECK MILKSHAKE PORCUPINE FACEBOOK WOODBLOCK KICKBOARD"
+    ).split():
+        assert w in words.rank, w
