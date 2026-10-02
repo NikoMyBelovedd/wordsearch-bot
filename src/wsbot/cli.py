@@ -49,7 +49,15 @@ def _memory_report() -> None:
     threading.Thread(target=report, daemon=True, name="memreport").start()
 
 
+def _experiments() -> None:
+    """local/stream_pace (a number in the file): WSBOT_STREAM_PACE for testing."""
+    f = ROOT / "local" / "stream_pace"
+    if f.exists() and not os.environ.get("WSBOT_STREAM_PACE"):
+        os.environ["WSBOT_STREAM_PACE"] = f.read_text(encoding="utf-8").strip() or "10"
+
+
 def main() -> None:
+    _experiments()
     from .slim import slim
 
     slim()

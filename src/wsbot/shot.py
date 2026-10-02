@@ -115,5 +115,7 @@ class Shot:
             return False
         if other.seq == self.seq and other.native is self.native:
             return True
-        a, b = self.coarse, other.coarse
+        # `mini`: the cheap copy the panel check makes anyway (`coarse` needs the big
+        # calibration copy, which most frames never otherwise get)
+        a, b = self.mini, other.mini
         return a.shape == b.shape and np.array_equal(a, b)

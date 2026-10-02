@@ -48,6 +48,10 @@ START_CODE = b"\x00\x00\x00\x01"
 STREAM_HEAD_MAX = 3_000_000
 _HEAD_STARTED = threading.Event()  # DEVTEST: raw /stream.bin bytes kept for offline replay
 DECODE_THREADS = int(os.environ.get("WSBOT_THREADS") or 1)
+# EXPERIMENT (off unless set): acknowledge the phone's frames this many times a second
+# on a timer. Its rate control reads a slow receiver and sends fewer frames, and the
+# stream (58 fps while the game animates) is ~half a bot's CPU plus the tunnel's.
+STREAM_PACE = float(os.environ.get("WSBOT_STREAM_PACE") or 0)
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
 # After a lost packet the stream server holds every frame until the phone sends a
 # keyframe. It asks once; when the phone ignores that, the picture stays frozen while
@@ -162,6 +166,7 @@ class IPhone:
         self._srv = None
         self._serve_task: asyncio.Task | None = None
         self._key_task: asyncio.Task | None = None
+        self._pace_task: asyncio.Task | None = None
         self._rsd = None
         self._held: tuple[int, int] | None = None
         self._us = None  # pymobiledevice3 UserspaceRsdTunnel while one is open
@@ -511,6 +516,8 @@ class IPhone:
         self._srv, self._serve_task, self._rsd = srv, task, rsd
         self._opened_t = time.monotonic()
         self._key_task = asyncio.create_task(self._keyframe_watchdog(srv), name="keyframe-watchdog")
+        if STREAM_PACE > 0:
+            self._pace_task = asyncio.create_task(self._pace(srv, STREAM_PACE), name="pace")
         self._held = None
         self.udid = rsd.udid
         log(
@@ -534,9 +541,10 @@ class IPhone:
 
     async def _close(self) -> None:
         task, rsd = self._serve_task, self._rsd
-        if self._key_task is not None:
-            self._key_task.cancel()
-            self._key_task = None
+        for t in (self._key_task, self._pace_task):
+            if t is not None:
+                t.cancel()
+        self._key_task = self._pace_task = None
         self._srv = self._serve_task = self._rsd = None
         if task is not None:
             task.cancel()  # serve() stops the device-side streams in its finally
@@ -569,6 +577,31 @@ class IPhone:
             return False
         since = self._frozen_since(srv)
         return since is not None and time.monotonic() - since > 0.3
+
+    async def _pace(self, srv, per_s: float) -> None:
+        """See STREAM_PACE: frame receipts + rate reports on a slow timer, and the
+        phone's frame rate in the log once a minute."""
+        log("DIAG", f"stream pacing: acking {per_s:g} frames a second")
+        loop = asyncio.get_running_loop()
+        last_t, last_aus, last_dec = loop.time(), self.stats["aus"], self.frames_decoded
+        while True:
+            await asyncio.sleep(1.0 / per_s)
+            sock, dest = srv._active_sock, srv._rtcp_dest
+            if sock is not None and dest is not None and srv._local_ssrc:
+                if srv._rtp_packets_received:
+                    with contextlib.suppress(OSError):
+                        await sock.sendto(srv._build_rctl_companion_packet(), *dest)
+                        await sock.sendto(srv._build_rctl_packet(), *dest)
+            now = loop.time()
+            if now - last_t >= 60:
+                aus, dec = self.stats["aus"], self.frames_decoded
+                log(
+                    "DIAG",
+                    f"stream: phone sent {(aus - last_aus) / (now - last_t):.1f} frames/s, "
+                    f"decoded {(dec - last_dec) / (now - last_t):.1f}/s, "
+                    f"{self._uncollapsed} shrunken so far",
+                )
+                last_t, last_aus, last_dec = now, aus, dec
 
     async def _keyframe_watchdog(self, srv) -> None:
         loop = asyncio.get_running_loop()
