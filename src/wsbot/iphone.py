@@ -129,6 +129,7 @@ REOPEN_RETRY_S = 5.0  # phone gone: try to reopen the session this often
 KEY_RETRY_S = 1.5  # frozen this long: ask for a keyframe again (and every KEY_RETRY_S)
 KEY_RESTART_S = 6.0  # still frozen: restart the stream session
 KEY_RESTART_COOLDOWN_S = 20.0
+WAKE_KEY_S = 4.0  # waking from quiet: wait this long for a keyframe, then restart the stream
 # Where the phone connection comes from. "userspace" = pymobiledevice3's in-process tunnel:
 # no root, no separate tunneld window, and the phone's video (UDP) lands inside this
 # process, so the macOS firewall can't drop it (it did: 0 RTP packets with tunneld on a
@@ -437,8 +438,10 @@ class IPhone:
 
     def set_quiet(self, quiet: bool) -> None:
         """Quiet: stop decoding (the bot sleeps or rests long, or AutomationHQ paused
-        it); the phone keeps streaming and its frames are dropped. Waking waits up
-        to a few seconds for a fresh keyframe, so nothing acts on the old picture."""
+        it); the phone keeps streaming and its frames are dropped, and the stream is
+        never restarted for sending nothing (see _keyframe_watchdog). Waking waits up
+        to a few seconds for a fresh keyframe, so nothing acts on the old picture, and
+        restarts the stream if none comes."""
         if quiet == self._quiet:
             return
         if quiet:
@@ -446,11 +449,22 @@ class IPhone:
             return
         seq0 = self._seq
         self._quiet = False
-        deadline = time.monotonic() + 4.0
+        if not self._wait_key(seq0) and (srv := self._srv) is not None:
+            log("RECOVERY", "iPhone stream: no keyframe after the quiet spell; restarting it")
+            try:
+                self._call(asyncio.wait_for(srv._ensure_fresh_stream(force=True), 10.0), 15.0)
+            except Exception as exc:
+                log("WARN", f"iPhone stream restart failed: {exc!r}")
+            self._wait_key(seq0)
+
+    def _wait_key(self, seq0: int) -> bool:
+        """Ask for a keyframe until a frame newer than `seq0` is decoded (or WAKE_KEY_S)."""
+        deadline = time.monotonic() + WAKE_KEY_S
         while self._seq == seq0 and time.monotonic() < deadline and not self._given_up():
             self._ask_key()
             with self._cond:
-                self._cond.wait_for(lambda: self._seq > seq0, 1.0)
+                self._cond.wait_for(lambda: self._seq > seq0, min(1.0, WAKE_KEY_S))
+        return self._seq != seq0
 
     def _ask_key(self) -> None:
         srv = self._srv
@@ -762,6 +776,15 @@ class IPhone:
         while True:
             await asyncio.sleep(0.25)
             now = loop.time()
+            if self._quiet:
+                # Nobody looks (a break, a long rest, paused), and a still screen sends
+                # no frames: pymobiledevice3's stall watchdog then restarted the stream
+                # every ~68 s for the whole break ("no AU progress ... restarting
+                # stream"), burning CPU and USB for nothing. Hold its clock while quiet;
+                # waking asks for a keyframe and restarts the stream if none comes.
+                srv._last_good_au_t = max(srv._last_good_au_t, now)
+                episode = None
+                continue
             since = self._frozen_since(srv)
             if since is None:
                 if episode is not None and now - episode > KEY_RETRY_S:
