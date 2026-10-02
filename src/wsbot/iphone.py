@@ -52,6 +52,9 @@ DECODE_THREADS = int(os.environ.get("WSBOT_THREADS") or 1)
 # on a timer. Its rate control reads a slow receiver and sends fewer frames, and the
 # stream (58 fps while the game animates) is ~half a bot's CPU plus the tunnel's.
 STREAM_PACE = float(os.environ.get("WSBOT_STREAM_PACE") or 0)
+# EXPERIMENT (off unless set): don't start the phone's audio stream. pymobiledevice3
+# starts it as a session-liveness signal like Xcode; the bot never listens to it.
+NO_AUDIO = bool(os.environ.get("WSBOT_NO_AUDIO"))
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
 # After a lost packet the stream server holds every frame until the phone sends a
 # keyframe. It asks once; when the phone ignores that, the picture stays frozen while
@@ -478,6 +481,12 @@ class IPhone:
             log("WARN", f"display info failed ({exc!r}); assuming {self.width}x{self.height}")
             dbg(f"display info traceback: {traceback.format_exc()}")
         srv = ScreenStreamServer(rsd, bind="127.0.0.1", http_port=self.port)
+        if NO_AUDIO:
+
+            async def no_audio() -> None:
+                return None
+
+            srv._ensure_audio_stream = no_audio
         task = asyncio.create_task(srv.serve(), name="screen-stream")
         try:
             deadline = time.monotonic() + 40
@@ -516,8 +525,7 @@ class IPhone:
         self._srv, self._serve_task, self._rsd = srv, task, rsd
         self._opened_t = time.monotonic()
         self._key_task = asyncio.create_task(self._keyframe_watchdog(srv), name="keyframe-watchdog")
-        if STREAM_PACE > 0:
-            self._pace_task = asyncio.create_task(self._pace(srv, STREAM_PACE), name="pace")
+        self._pace_task = asyncio.create_task(self._pace(srv, STREAM_PACE), name="pace")
         self._held = None
         self.udid = rsd.udid
         log(
@@ -579,21 +587,24 @@ class IPhone:
         return since is not None and time.monotonic() - since > 0.3
 
     async def _pace(self, srv, per_s: float) -> None:
-        """See STREAM_PACE: frame receipts + rate reports on a slow timer, and the
-        phone's frame rate in the log once a minute."""
-        log("DIAG", f"stream pacing: acking {per_s:g} frames a second")
+        """The phone's frame rate in the log (every minute while an experiment is on,
+        else every 10), and with STREAM_PACE frame receipts on a slow timer."""
+        experiment = per_s > 0 or NO_AUDIO
+        if experiment:
+            log("DIAG", f"stream experiment: pace={per_s:g}/s no_audio={NO_AUDIO}")
+        every = 60 if experiment else 600
         loop = asyncio.get_running_loop()
         last_t, last_aus, last_dec = loop.time(), self.stats["aus"], self.frames_decoded
         while True:
-            await asyncio.sleep(1.0 / per_s)
+            await asyncio.sleep(1.0 / per_s if per_s > 0 else 5.0)
             sock, dest = srv._active_sock, srv._rtcp_dest
-            if sock is not None and dest is not None and srv._local_ssrc:
+            if per_s > 0 and sock is not None and dest is not None and srv._local_ssrc:
                 if srv._rtp_packets_received:
                     with contextlib.suppress(OSError):
                         await sock.sendto(srv._build_rctl_companion_packet(), *dest)
                         await sock.sendto(srv._build_rctl_packet(), *dest)
             now = loop.time()
-            if now - last_t >= 60:
+            if now - last_t >= every:
                 aus, dec = self.stats["aus"], self.frames_decoded
                 log(
                     "DIAG",
