@@ -303,6 +303,10 @@ class IOSGameDevice(BaseDevice):
     def view_stale(self) -> bool:
         return self.phone.frozen
 
+    def set_fatal_handler(self, handler) -> None:
+        """Called once if the phone's screen stream can't be brought back (iphone.py)."""
+        self.phone.on_fatal = handler
+
     def reconnect(self) -> None:
         """Frames failing: reopen the USB session (stream server + touch)."""
         try:

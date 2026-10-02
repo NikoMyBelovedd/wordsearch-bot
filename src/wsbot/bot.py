@@ -43,6 +43,7 @@ from .debug import dbg, snap
 from .device import open_device
 from .goal import Goal, local_file, seconds_until_midnight
 from .imgio import imwrite
+from .instance import acquire as lock_phone
 from .letters import LetterReader
 from .log import log
 from .schedule import Pacer
@@ -122,7 +123,19 @@ class Bot:
     def __init__(self, serial: str, root: Path, goal: Goal, *, dry_run: bool = False) -> None:
         self.root = root
         self.goal = goal
-        self.device = open_device(serial, dry_run=dry_run)
+        # One bot per phone: a second one exits here, before it touches the phone.
+        self._locks = [lock_phone(root, serial)]
+        self.fatal: str | None = None  # why the bot gave up (the process exits non-zero)
+        try:
+            self.device = open_device(serial, dry_run=dry_run)
+            # "ios" -> "ios:UDID": the UDID's lock too (AutomationHQ passes the UDID)
+            if getattr(self.device, "serial", serial) != serial:
+                self._locks.append(lock_phone(root, self.device.serial))
+        except BaseException:
+            if hasattr(self, "device"):
+                self.device.close()
+            self._release_locks()
+            raise
         self.diagnostics = root / "diagnostics"
         self.diagnostics.mkdir(exist_ok=True)
         self.letters = LetterReader(root / "templates" / "letters")
@@ -132,6 +145,8 @@ class Bot:
         self.pass_fired: list[Hit] = []
         templates = root / self.device.templates
         self.watcher = PopupWatcher(self.device, templates, PACKAGE, self.diagnostics)
+        self.watcher.on_fatal = self._fatal
+        getattr(self.device, "set_fatal_handler", lambda _: None)(self._fatal)
         self.pacing = Pacing(swipe_ms=self.device.swipe_ms)
         self.pacer = Pacer(goal.schedule, goal.progress) if goal.schedule else None
         self.resting_until: float | None = None  # epoch; set while idling / on a break
@@ -250,6 +265,8 @@ class Bot:
     def _clear_tap(self) -> None:
         if getattr(self.device, "game_missing", lambda: False)():
             return  # on the home screen a blind tap opens apps; the watcher relaunches
+        if not self.watcher.blind_taps_ok():
+            return  # not sure we're in the game any more (the watcher escalates)
         if self.clear_taps % 2 == 0:
             self.device.tap(*self.board_center, why="clear popup (board center)")
         else:
@@ -850,7 +867,20 @@ class Bot:
             if self.watcher.is_alive():
                 self.watcher.join(timeout=10)
             self.device.close()
+            self._release_locks()
             self.status = "stopped"
+
+    def _fatal(self, message: str) -> None:
+        """Can't go on (the phone's screen stream is dead, stuck off the game): stop,
+        and the process exits non-zero so AutomationHQ restarts it."""
+        if self.fatal is None:
+            self.fatal = message
+            log("ERROR", f"giving up: {message}")
+        self.stop_event.set()
+
+    def _release_locks(self) -> None:
+        for lock in self._locks:
+            lock.release()
 
     def _pace(self, level_s: float) -> None:
         """Idle between levels / take a break, per the goal's schedule."""
