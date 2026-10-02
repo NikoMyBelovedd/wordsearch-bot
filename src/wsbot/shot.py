@@ -26,6 +26,7 @@ class Shot:
         "_mini",
         "_panel",
         "_small",
+        "_thumb",
         "calib_size",
         "native",
         "seq",
@@ -42,6 +43,7 @@ class Shot:
         self._mini: np.ndarray | None = None
         self._panel: tuple[int, int, int, int] | bool | None = False  # False = not looked
         self._board: Board | bool | None = False
+        self._thumb: np.ndarray | None = None
 
     # Two threads may ask at once; both compute the same thing and one copy wins.
     @property
@@ -99,6 +101,15 @@ class Shot:
         if self._panel is False:
             self._panel = find_panel(self.mini, self.mini_scale)
         return self._panel  # type: ignore[return-value]
+
+    @property
+    def thumb(self) -> np.ndarray:
+        """A 27x48 int16 thumbnail (from `mini`): has the screen changed at all?"""
+        if self._thumb is None:
+            self._thumb = cv2.resize(self.mini, (27, 48), interpolation=cv2.INTER_AREA).astype(
+                np.int16
+            )
+        return self._thumb
 
     @property
     def board(self) -> Board | None:

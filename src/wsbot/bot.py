@@ -36,7 +36,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from .board import Board, highlighted
@@ -200,9 +199,9 @@ class Bot:
                 why = "watcher produced no frame"
                 continue
             last_time = self.watcher.frame_time
-            frame, board = shot.calib, shot.board
+            board = shot.board
             now = time.monotonic()
-            thumb = cv2.resize(frame, (27, 48), interpolation=cv2.INTER_AREA).astype(np.int16)
+            thumb = shot.thumb  # not from the big calibration copy: most frames never need it
             if board is not None or still is None or np.abs(thumb - still).mean() > 1.0:
                 still, still_since = thumb, now
             elif now - still_since >= HUNG_S:

@@ -237,6 +237,7 @@ class PopupWatcher(threading.Thread):
         self._scores: dict[str, tuple[float, tuple[int, int]]] = {}
         self._looked: list[Popup] = []
         self._last_full = 0.0
+        self._full_shot: Shot | None = None  # the picture the last full look was at
         self.frame_time = 0.0
         self.fps = 0.0
         self._frame_cond = threading.Condition()
@@ -346,7 +347,10 @@ class PopupWatcher(threading.Thread):
 
         if snap_due("calib_frame", 15):
             snap("calib_frame", shot.calib, every_s=15, note=f"board_visible={self.board_visible}")
-        if fresh:
+        # A new picture, or a full look that's due on a picture last looked at only
+        # in part: a popup that went still after its last new frame was never seen
+        # (a static Bonus Words popup sat 40 s until "game hung" restarted the game).
+        if fresh or (self._full_shot is not shot and self._full_due(now)):
             self._score(shot, now)
         matched = self._handle_popups(now)
         if matched or self.board_visible:
@@ -370,19 +374,22 @@ class PopupWatcher(threading.Thread):
         # it isn't fooled by letters flying off after a word is found.
         return board_visible_in(shot, self.expected_panel)
 
+    def _full_due(self, now: float) -> bool:
+        in_view = self.board_visible and self.expected_panel is not None
+        every = FULL_EVERY_S if in_view else SCAN_EVERY_S
+        if self.resting.is_set():
+            every = max(every, REST_SCAN_S)
+        return now - self._last_full >= every
+
     def _score(self, shot: Shot, now: float) -> None:
         """Match the popup templates against a new picture. While the level's board is
         fully in view nothing can be over it but the toast (popups dim or hide the
         board, so it stops being "visible" the frame they show), so then the whole list
         is checked only every FULL_EVERY_S; the rest of the time every SCAN_EVERY_S.
         In between, only the toast (unless the eye watches it)."""
-        in_view = self.board_visible and self.expected_panel is not None
-        every = FULL_EVERY_S if in_view else SCAN_EVERY_S
-        if self.resting.is_set():
-            every = max(every, REST_SCAN_S)
-        full = now - self._last_full >= every
+        full = self._full_due(now)
         if full:
-            self._last_full = now
+            self._last_full, self._full_shot = now, shot
         looked = []
         for popup in self.popups:
             if not full and not (popup.covers and not self._eye_on):
