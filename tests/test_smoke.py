@@ -79,18 +79,6 @@ def test_learning_needs_a_whole_lit_run():
     assert _whole_run(Hit(0, "RAOML", (0, 7), (0, 3)), lit)
 
 
-def test_learning_keeps_the_longest_and_skips_ambiguous_lines():
-    from wsbot.bot import _drop_ambiguous
-    from wsbot.solver import Hit
-
-    netball = Hit(0, "NETBALL", (4, 0), (4, 6))
-    llabten = Hit(0, "LLABTEN", (4, 6), (4, 0))
-    netbal = Hit(0, "NETBAL", (4, 0), (4, 5))
-    assert _drop_ambiguous([netbal, netball, llabten]) == [netball, llabten]
-    itind, tindy = Hit(0, "ITIND", (0, 0), (4, 4)), Hit(0, "TINDY", (1, 1), (5, 5))
-    assert _drop_ambiguous([itind, tindy]) == []
-
-
 def test_coarse_popup_match_finds_the_same_spot_and_score():
     """match() with a quarter-res first look must agree with the full half-res search."""
     rng = np.random.default_rng(7)
@@ -123,3 +111,90 @@ def test_letter_scores_match_one_template_at_a_time(tmp_path: Path):
         assert all(abs(fast[k] - best[k]) < 1e-5 for k in best), letter
         assert reader.ranked(glyph)[0][1] == max(best, key=best.get)
     assert reader.ranked(np.zeros((64, 64), np.uint8))[0][0] == 0.0  # blank cell
+
+
+def _learner(tmp_path: Path, grid: list[str], swiped: set[str]):
+    """A Bot with just what _learn needs; pass_fired = the exhaustive pass's lines."""
+    from wsbot.bot import Bot, all_lines
+
+    bot = Bot.__new__(Bot)
+    # the wordlist of the day those levels were played (MIGRATOR, IBERIA in; the theme
+    # words out): the learner is what's under test, not the list
+    known = tmp_path / "words.txt"
+    known.write_text("MIGRATOR\nIBERIA\nCAIR\nBOARD\n")
+    bot.words = Dictionary(known)
+    bot.grid = grid
+    bot.pass_fired = [h for h in all_lines(grid) if h.word not in swiped]
+    bot._learned_path = tmp_path / "learned-words.txt"
+    return bot
+
+
+def _cells(spec: str) -> set[tuple[int, int]]:
+    return {(int(r), int(c)) for r, c in (x.split(",") for x in spec.split())}
+
+
+def test_learning_a_known_word_plus_a_letter(tmp_path: Path):
+    """Level 1683 on the laptop: MIGRATORY (MIGRATOR is in the wordlist) and SIBERIA
+    (IBERIA is) were found by the exhaustive pass but never learned."""
+    grid = (
+        "SCAIREBIS/DYLCYTHNU/BRAWUICEO/IEIDCHIHU/RECEOWTCD/"
+        "CDAWLCCII/HNLWDRRLC/IIGZHMARE/FEZEERFOD/YROTARGIM"
+    ).split("/")
+    fresh = _cells("0,2 0,3 0,4 0,6 0,7 9,0 9,2 9,3 9,4 9,5 9,6 9,7 9,8")
+    unlit_after = _cells("1,0 2,0 3,0 4,0 5,0 6,0 7,0 8,0 1,8 2,8 3,8")
+    every = {(r, c) for r in range(10) for c in range(9)}
+    bot = _learner(tmp_path, grid, {"MIGRATOR", "IBERIA"})
+    bot._lit_cells = lambda board: every - unlit_after
+    bot._learn(None, every - unlit_after - fresh, False)
+    learned = set(bot._learned_path.read_text().split())
+    assert {"MIGRATORY", "SIBERIA"} <= learned
+    assert "MIGRATOR" not in learned and "IBERIA" not in learned
+
+
+def test_learning_a_word_next_to_a_found_letter(tmp_path: Path):
+    """WOODBLOCK ran down a column under a found E: the learner kept only the longest
+    line and saved WOODBLOCKE, so the next WOODBLOCK level was slow again."""
+    grid = [f"QQQ{ch}Q" for ch in "EKCOLBDOOW"]
+    fresh = {(r, 3) for r in range(1, 10)}
+    lit = fresh | {(0, 3)}
+    bot = _learner(tmp_path, grid, set())
+    bot._lit_cells = lambda board: lit
+    bot._learn(None, lit - fresh, False)
+    learned = set(bot._learned_path.read_text().split())
+    assert {"WOODBLOCK", "WOODBLOCKE"} <= learned
+
+
+def test_words_saved_with_an_extra_letter_are_tried_trimmed(tmp_path: Path):
+    from wsbot.bot import Bot
+
+    bot = Bot.__new__(Bot)
+    bot.words = Dictionary(ROOT / "data" / "words.txt")
+    bot._learned_path = tmp_path / "learned-words.txt"
+    bot._learned_path.write_text("FKICKBOARD\nDRAOBKCIKF\nYOYOI\n")
+    bot._load_learned()
+    grid = ["XKICKBOARDX", "XXXXXXXXXXX"]
+    assert "KICKBOARD" in {h.word for h in bot.words.solve(grid)}
+    assert "YOYO" in bot.words.rank
+
+
+def test_wordlist_has_the_theme_words_the_old_one_missed():
+    """The old list (cut at 200,000 lines) lacked these; each cost an exhaustive pass."""
+    words = Dictionary(ROOT / "data" / "words.txt")
+    for w in (
+        "WATERFALL SANCTUARY WHISPERED SIBERIA MIGRATORY VIRGO OSLO SEOUL PERSIMMON "
+        "SYMBIOTIC SHIPWRECK MILKSHAKE PORCUPINE FACEBOOK WOODBLOCK KICKBOARD DONUT"
+    ).split():
+        assert w in words.rank, w
+
+
+def test_a_word_ending_at_another_finds_first_letter_is_tried_trimmed(tmp_path: Path):
+    """Level 1852: BURANO ran into MURANO's M; only BURANOM qualified, so the next board
+    must also try BURANO (in this run, not just after a restart)."""
+    grid = ["BURANOMWY", "QQQQQQUQQ", "QQQQQQRQQ", "QQQQQQAQQ", "QQQQQQNQQ", "QQQQQQOQQ"]
+    fresh = {(0, c) for c in range(7)} | {(r, 6) for r in range(1, 6)}
+    bot = _learner(tmp_path, grid, set())
+    bot.pass_fired = [h for h in bot.pass_fired if h.word in ("BURANOM", "MONARUB")]
+    bot._lit_cells = lambda board: fresh
+    bot._learn(None, set(), False)
+    assert set(bot._learned_path.read_text().split()) == {"BURANOM", "MONARUB"}
+    assert "BURANO" in bot.words.rank and "BURANO" in {h.word for h in bot.words.solve(grid)}
