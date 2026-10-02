@@ -127,6 +127,44 @@ class NoTunnel(IPhoneError):
     """No tunnel to the phone (unplugged, not trusted yet, or tunneld down)."""
 
 
+# The CoreDevice screen stream and the USB touch it unlocks (Xcode's Device Hub) are new
+# in iOS 27. Older phones have no tunnel (iOS 15-16) or no such stream (iOS 17-26), so
+# without this check they waited forever for a tunnel or failed with "Developer Disk
+# Image mounted?".
+MIN_IOS = (27,)
+
+
+class TooOld(IPhoneError):
+    """The phone's iOS is older than this backend can work with."""
+
+
+def ios_version(text: str | None) -> tuple[int, ...]:
+    """"26.4.1" -> (26, 4, 1); () when unknown."""
+    parts = []
+    for part in (text or "").split("."):
+        if not part.isdigit():
+            break
+        parts.append(int(part))
+    return tuple(parts)
+
+
+def too_old(version: str | None) -> bool:
+    """Below MIN_IOS. An unknown version isn't too old."""
+    have = ios_version(version)
+    return bool(have) and have < MIN_IOS
+
+
+def check_ios(udid: str, version: str | None) -> None:
+    """Raise TooOld for a phone below MIN_IOS."""
+    if too_old(version):
+        need = ".".join(map(str, MIN_IOS))
+        raise TooOld(
+            f"iPhone {udid or '?'} has iOS {version}; the bot's iPhone mode needs iOS {need} or "
+            f"newer (it uses iOS {need}'s USB screen sharing and touch). Update the iPhone in "
+            "Settings > General > Software Update, or play on an Android phone."
+        )
+
+
 def _annexb(au: bytes) -> bytes:
     """Length-prefixed NAL units (hvcC style, as /stream.bin sends them) -> Annex-B."""
     out, i = bytearray(), 0
@@ -403,7 +441,7 @@ class IPhone:
                     self._opens += 1
                     return
                 except Exception as exc:  # NoTunnel, no frames, OSError from the tunnel
-                    if self._given_up():
+                    if self._given_up() or isinstance(exc, TooOld):
                         raise
                     waited = time.monotonic() - t0
                     if waited >= next_note:
@@ -437,6 +475,7 @@ class IPhone:
 
         await self._close()
         t_open = time.monotonic()
+        await self._check_usb_versions()
         rsds = []
         if use_userspace_tunnel():
             try:
@@ -481,7 +520,12 @@ class IPhone:
             )
             with contextlib.suppress(Exception):
                 dbg(f"rsd services for {r.udid}: {sorted(r.peer_info.get('Services', {}))}")
-        rsd = next((r for r in rsds if not self.udid or r.udid == self.udid), None)
+        matching = [r for r in rsds if not self.udid or r.udid == self.udid]
+        # Without a UDID, prefer a phone that's new enough over an older one.
+        rsd = next(
+            (r for r in matching if not too_old(getattr(r, "product_version", None))),
+            matching[0] if matching else None,
+        )
         for r in rsds:
             if r is not rsd:
                 await r.close()
@@ -492,6 +536,11 @@ class IPhone:
             )
         from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
 
+        try:
+            check_ios(rsd.udid, getattr(rsd, "product_version", None))
+        except TooOld:
+            await rsd.close()
+            raise
         with contextlib.suppress(Exception):
             self.product_type = rsd.product_type or ""
 
@@ -557,6 +606,33 @@ class IPhone:
             "DEVICE",
             f"iPhone {rsd.udid}: USB stream + touch up, viewer http://127.0.0.1:{self.port}/",
         )
+
+    async def _check_usb_versions(self) -> None:
+        """Before any tunnel: is the phone (or, without a UDID, every iPhone on USB) new
+        enough? Read over plain lockdown without pairing, so it never asks for Trust. Any
+        failure here is ignored: the tunnel path reports it as before."""
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.usbmux import list_devices
+
+        versions: dict[str, str] = {}
+        with contextlib.suppress(Exception):
+            for dev in await asyncio.wait_for(list_devices(), 10):
+                if not dev.is_usb or (self.udid and dev.serial != self.udid):
+                    continue
+                with contextlib.suppress(Exception):
+                    lockdown = await asyncio.wait_for(
+                        create_using_usbmux(dev.serial, autopair=False, connection_type="USB"),
+                        10,
+                    )
+                    try:
+                        versions[dev.serial] = lockdown.all_values.get("ProductVersion") or ""
+                    finally:
+                        await lockdown.close()
+        dbg(f"iPhones on USB by iOS version: {versions}")
+        # Without a UDID the first tunnel wins, so only refuse when no phone could work.
+        if versions and all(too_old(v) for v in versions.values()):
+            udid, version = next(iter(versions.items()))
+            check_ios(udid, version)
 
     async def _userspace_rsd(self):
         from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel

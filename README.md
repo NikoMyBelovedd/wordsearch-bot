@@ -344,7 +344,7 @@ Yes. Keep the terminal window open, and keep the computer from going to sleep.
 Not for the game. Press **P** to pause first if you need to.
 
 **Does it work on my iPhone model?**
-It needs iOS 27 or newer. It's tested on the iPhone SE (3rd generation) and the iPhone 17. Home-button iPhones (SE 2/3) use the SE layout; every Face ID iPhone uses the iPhone 17 layout, which finds the game's top bar on the live screen, so other models should work too. If yours doesn't, run it with `--debug`, then `uv run wsbot --report`, and send the `wsbot-report.zip` it makes (open an issue on GitHub), or add the support yourself and send a pull request.
+It needs iOS 27 or newer: it sees and touches the screen through iOS 27's USB screen sharing, which older iOS versions don't have. On an older iPhone it stops right away and says which iOS the phone has. It's tested on the iPhone SE (3rd generation) and the iPhone 17. Home-button iPhones (SE 2/3) use the SE layout; every Face ID iPhone uses the iPhone 17 layout, which finds the game's top bar on the live screen, so other models should work too. If yours doesn't, run it with `--debug`, then `uv run wsbot --report`, and send the `wsbot-report.zip` it makes (open an issue on GitHub), or add the support yourself and send a pull request.
 
 **Will it get my account banned?**
 It might; automating a game can break its terms of service. See the [disclaimer](#disclaimer).
