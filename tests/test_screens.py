@@ -39,6 +39,7 @@ EXPECTED = {
     "home_no_status_bar": ("ios_home_game_icon", "relaunch"),
     "app_switcher": ("ios_app_switcher", "relaunch"),
     "alert_watch_notifications": ("ios_dont_allow", "tap"),
+    "claim_bonus_tutorial": ("tutorial_claim_bonus", "tap"),
     "board": (None, None),
     "board_letters_flying": (None, None),
 }

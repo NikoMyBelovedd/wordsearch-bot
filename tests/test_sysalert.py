@@ -148,6 +148,38 @@ def test_the_already_collected_toast_over_the_board_is_not_an_alert():
     assert watcher_mod.match(shot.small, toast, shot.coarse_as(toast.coarse_look))[0] >= 0.85
 
 
+def _tutorial_box_at_bottom(img: np.ndarray, scale: float, bottom: int) -> np.ndarray:
+    """claim_bonus_tutorial with the tutorial box shrunk and moved to the bottom of the
+    popup's white body (painted over the Claim button), where an alert's buttons sit."""
+    out = img.copy()
+    box = out[882:1014, 100:650].copy()
+    out[870:1066, 104:646] = (255, 255, 240)
+    small = cv2.resize(box, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    h, w = small.shape[:2]
+    out[bottom - h : bottom, 375 - w // 2 : 375 - w // 2 + w] = small
+    return out
+
+
+def test_the_claim_bonus_tutorial_box_is_not_an_alert(monkeypatch):
+    """Real iPhone (the laptop, alerts-1), 2026-10-02 11:57: the "Claim bonus word reward"
+    tutorial box over the Bonus Words popup read as a one-button alert ([Claim bonus word
+    reward], no safe button): the popup's white body passed as the alert box, the
+    tutorial box as its button. The rounded-corner rules (see the toast test) stop it:
+    the body's top corners are square (its colored header) and the tutorial box has
+    small corner radii, not capsule ends. That frame wasn't saved; this is the same
+    screen, and versions of it with the tutorial box at the body's bottom, which are
+    alert-shaped but for their corners (the rules without corners fire on them)."""
+    img = frame("claim_bonus_tutorial")
+    assert sysalert.find_alert(img) is None
+    near = [
+        _tutorial_box_at_bottom(img, sc, bottom)
+        for sc, bottom in [(0.8, 1040), (0.85, 1055), (0.9, 1055)]
+    ]
+    assert all(sysalert.find_alert(f) is None for f in near)
+    monkeypatch.setattr(sysalert, "_round_corners", lambda filled, k: True)
+    assert all(sysalert.find_alert(f) is not None for f in near)
+
+
 @pytest.mark.parametrize("name", GAME_SCREENS + REAL_ALERTS)
 def test_game_screens_have_no_banner(name):
     assert sysalert.find_banner(frame(name)) is None
