@@ -52,6 +52,28 @@ DECODE_THREADS = int(os.environ.get("WSBOT_THREADS") or 1)
 # on a timer. Its rate control reads a slow receiver and sends fewer frames, and the
 # stream (58 fps while the game animates) is ~half a bot's CPU plus the tunnel's.
 STREAM_PACE = float(os.environ.get("WSBOT_STREAM_PACE") or 0)
+# Decode the phone's video on the GPU (Direct3D 11 / VideoToolbox / VA-API) when the
+# computer has one, keeping frames there until the bot looks at one: ~half the decode
+# CPU on an i5-6200U. "off" forces software; a device type name forces that one.
+HW_DECODE = (os.environ.get("WSBOT_HWDECODE") or "auto").lower()
+HW_FAIL_LIMIT = 20  # decode errors in a row on the GPU: fall back to software for good
+_HW_BY_PLATFORM = {"win32": "d3d11va", "darwin": "videotoolbox", "linux": "vaapi"}
+
+
+def _hw_device() -> str | None:
+    if HW_DECODE == "off":
+        return None
+    want = _HW_BY_PLATFORM.get(sys.platform) if HW_DECODE == "auto" else HW_DECODE
+    if not want:
+        return None
+    try:
+        from av.codec.hwaccel import hwdevices_available
+
+        return want if want in hwdevices_available() else None
+    except Exception:
+        return None
+
+
 # EXPERIMENT (off unless set): don't start the phone's audio stream. pymobiledevice3
 # starts it as a session-liveness signal like Xcode; the bot never listens to it.
 NO_AUDIO = bool(os.environ.get("WSBOT_NO_AUDIO"))
@@ -180,6 +202,8 @@ class IPhone:
         self._frame = None
         self._img: np.ndarray | None = None  # self._frame as BGR, once asked for
         self._quiet = False  # nobody looks: drop the phone's frames undecoded
+        self._hw: str | bool | None = None  # GPU decoder: None = not tried, False = off
+        self._hw_errors = 0
         self._want_key = False  # after a quiet spell: decode again from a keyframe
         self._seq = 0
         self._frame_t = 0.0
@@ -696,16 +720,19 @@ class IPhone:
                     self._want_key, codec = False, None
                 if codec is None or kind == 2:  # 2 = keyframe after a restart: fresh decoder
                     dbg(f"new HEVC decoder (kind={kind})")
-                    codec = av.CodecContext.create("hevc", "r")
-                    # Not "AUTO": frame-threading workers hold our packets, and freeing
-                    # the old decoder (a restart, shutdown) then deadlocks on the GIL.
-                    codec.thread_type = "SLICE"
-                    # One bot per phone on one computer: no decoder thread per core each.
-                    codec.thread_count = DECODE_THREADS
+                    codec = self._decoder(av)
                 try:
                     decoded = codec.decode(av.Packet(_annexb(au)))
+                    self._hw_errors = 0
                 except av.error.FFmpegError as exc:
                     self.stats["decode_err"] += 1
+                    if self._hw:
+                        self._hw_errors += 1
+                        if self._hw_errors >= HW_FAIL_LIMIT:
+                            log("WARN", f"GPU video decoding keeps failing ({exc}); using the CPU")
+                            self._hw, codec, self._want_key = False, None, True
+                            self._ask_key()
+                            continue
                     self.stats["err"] = f"decode: {exc}"[:200]
                     if self.stats["decode_err"] <= 50:
                         dbg(
@@ -727,6 +754,29 @@ class IPhone:
                     self._publish(frame)
         finally:
             conn.close()
+
+    def _decoder(self, av):
+        """A fresh HEVC decoder: on the GPU when there is one (see HW_DECODE)."""
+        codec = None
+        if self._hw is None:
+            self._hw = _hw_device() or False
+        if self._hw:
+            try:
+                from av.codec.hwaccel import HWAccel
+
+                hw = HWAccel(device_type=self._hw, allow_software_fallback=True, is_hw_owned=True)
+                codec = av.CodecContext.create("hevc", "r", hwaccel=hw)
+            except Exception as exc:
+                log("DIAG", f"GPU video decoding ({self._hw}) unavailable: {exc!r}; using the CPU")
+                self._hw = False
+        if codec is None:
+            codec = av.CodecContext.create("hevc", "r")
+        # Not "AUTO": frame-threading workers hold our packets, and freeing the old
+        # decoder (a restart, shutdown) then deadlocks on the GIL.
+        codec.thread_type = "SLICE"
+        # One bot per phone on one computer: no decoder thread per core each.
+        codec.thread_count = DECODE_THREADS
+        return codec
 
     def _keep_head(self, head: bytes, body: bytes) -> None:
         """Raw /stream.bin bytes (same framing) for offline replay: diagnostics/debug."""
