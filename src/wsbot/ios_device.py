@@ -297,6 +297,9 @@ class IOSGameDevice(BaseDevice):
         size = (round((x1 - x0) * scale), round((y1 - y0) * scale))
         return cv2.resize(crop, size, interpolation=cv2.INTER_AREA), t
 
+    def set_quiet(self, quiet: bool) -> None:
+        self.phone.set_quiet(quiet)
+
     def view_stale(self) -> bool:
         return self.phone.frozen
 

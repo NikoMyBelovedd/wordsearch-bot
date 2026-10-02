@@ -872,12 +872,14 @@ class Bot:
         if seconds >= 60:
             log("PACE", f"{what} for {seconds / 60:.0f} min, back at {back}")
             self.watcher.idle.set()
+        self.watcher.resting.set()
         try:
             while not self.stop_event.is_set() and (left := until - time.time()) > 0:
                 self._hold()
                 self.stop_event.wait(min(1.0, left))
         finally:
             self.watcher.idle.clear()
+            self.watcher.resting.clear()
             self.resting_until = None
             if seconds >= IDLE_RELAUNCH_S:
                 self._relaunch = True

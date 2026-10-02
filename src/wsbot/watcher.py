@@ -65,6 +65,10 @@ FULL_EVERY_S = 1.0  # board fully in view: the whole popup list this often
 # Otherwise (a popup, a level change) this often: the whole list was ~45% of a bot's
 # CPU at 5 looks a second, and a button tapped 0.2 s later costs nothing.
 SCAN_EVERY_S = 0.4
+# While the bot rests between levels (paced play) nothing is urgent: look once a
+# second and scan the whole list every few seconds. Rests are ~half of paced play.
+REST_PERIOD_S = 1.0
+REST_SCAN_S = 3.0
 
 
 def board_visible_in(shot: Shot, expected: tuple[int, int, int, int] | None) -> bool:
@@ -205,6 +209,7 @@ class PopupWatcher(threading.Thread):
         self.popups = load_popups(templates)
         self.stop_event = threading.Event()
         self.idle = threading.Event()  # set while the bot sleeps until its next day
+        self.resting = threading.Event()  # set while the bot rests (see REST_PERIOD_S)
         self.level_done = threading.Event()
         self.last_action = 0.0  # monotonic time the watcher last tapped a blocking popup
         self._last_tap = 0.0  # monotonic time the watcher last tapped any popup
@@ -273,11 +278,18 @@ class PopupWatcher(threading.Thread):
         if self._eye_on:
             threading.Thread(target=self._watch_cover, daemon=True, name="toast-eye").start()
         failures = 0
-        period = 1.0 / MAX_FPS
+        quiet = False
         while not self.stop_event.is_set():
             if self.idle.is_set():
+                if not quiet:  # nobody looks for a while: stop decoding the phone's video
+                    quiet = True
+                    self._set_quiet(True)
                 self.stop_event.wait(1.0)
                 continue
+            if quiet:
+                quiet = False
+                self._set_quiet(False)
+            period = REST_PERIOD_S if self.resting.is_set() else 1.0 / MAX_FPS
             t0 = time.monotonic()
             try:
                 self._tick()
@@ -293,6 +305,14 @@ class PopupWatcher(threading.Thread):
             dt = time.monotonic() - t0
             self.fps = 0.8 * self.fps + 0.2 * (1 / dt if dt > 0 else 0)
         log("WATCHER", "stopped")
+
+    def _set_quiet(self, quiet: bool) -> None:
+        set_quiet = getattr(self.device, "set_quiet", None)
+        if set_quiet is not None:
+            try:
+                set_quiet(quiet)
+            except Exception as exc:
+                log("WARN", f"couldn't {'pause' if quiet else 'resume'} the screen stream: {exc!r}")
 
     def covering(self) -> tuple[int, int] | None:
         """The y range a toast covers right now, or None. Swipes there are swallowed."""
@@ -355,7 +375,10 @@ class PopupWatcher(threading.Thread):
         is checked only every FULL_EVERY_S; the rest of the time every SCAN_EVERY_S.
         In between, only the toast (unless the eye watches it)."""
         in_view = self.board_visible and self.expected_panel is not None
-        full = now - self._last_full >= (FULL_EVERY_S if in_view else SCAN_EVERY_S)
+        every = FULL_EVERY_S if in_view else SCAN_EVERY_S
+        if self.resting.is_set():
+            every = max(every, REST_SCAN_S)
+        full = now - self._last_full >= every
         if full:
             self._last_full = now
         looked = []
@@ -443,8 +466,8 @@ class PopupWatcher(threading.Thread):
         popup, (x0, y0, _, _) = self._eye, box
         last = None
         while not self.stop_event.is_set():
-            if self.idle.is_set():
-                self.stop_event.wait(1.0)
+            if self.idle.is_set() or self.resting.is_set():  # no swipes, no toasts
+                self.stop_event.wait(0.5)
                 continue
             try:
                 small, t = self.device.peek(box, SCALE)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -211,3 +212,37 @@ def test_without_the_board_the_full_list_is_checked_every_scan_period(
         now[0] += 0.2
     assert not w.board_visible
     assert counted.count("next_level") == 3
+
+
+def test_resting_scans_rarely(counted, tmp_path, monkeypatch):
+    frames = []
+    for i in range(16):
+        img = np.full((CALIB[1], CALIB[0], 3), (20 + 10 * i, 140, 60), np.uint8)
+        frames.append(Shot(i, native_of(img), CALIB))
+    w = make_watcher(frames, tmp_path)
+    w.resting.set()
+    now = [100.0]
+    monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
+    for _ in range(16):  # 1 look a second while resting: full lists at 0, 3, 6 ... 15 s
+        w._tick()
+        now[0] += 1.0
+    assert counted.count("next_level") == 6
+
+
+def test_idle_watcher_quiets_the_stream_and_wakes_it(tmp_path, monkeypatch):
+    native = native_of(board_frame())
+    w = make_watcher([Shot(1, native, CALIB)], tmp_path)
+    calls: list[bool] = []
+    w.device.set_quiet = calls.append
+    w._eye_on = False
+    monkeypatch.setattr(watcher_mod, "MAX_FPS", 50.0)
+    w.idle.set()
+    w.start()
+    deadline = time.monotonic() + 3
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.02)
+    w.idle.clear()
+    while len(calls) < 2 and time.monotonic() < deadline + 3:
+        time.sleep(0.02)
+    w.stop()
+    assert calls[:2] == [True, False]

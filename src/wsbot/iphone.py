@@ -171,6 +171,8 @@ class IPhone:
         # someone asks (latest): the phone sends up to 60 a second, the bot looks at ~5.
         self._frame = None
         self._img: np.ndarray | None = None  # self._frame as BGR, once asked for
+        self._quiet = False  # nobody looks: drop the phone's frames undecoded
+        self._want_key = False  # after a quiet spell: decode again from a keyframe
         self._seq = 0
         self._frame_t = 0.0
         self.stream_connected = False
@@ -315,6 +317,30 @@ class IPhone:
                 "the screen stream sends no frames (is the phone unlocked, screen on?)"
             )
         log("DIAG", f"first frame after {time.monotonic() - t0:.1f}s: {self.stats}")
+
+    def set_quiet(self, quiet: bool) -> None:
+        """Quiet: stop decoding (the bot sleeps or rests long, or AutomationHQ paused
+        it); the phone keeps streaming and its frames are dropped. Waking waits up
+        to a few seconds for a fresh keyframe, so nothing acts on the old picture."""
+        if quiet == self._quiet:
+            return
+        if quiet:
+            self._quiet = True
+            return
+        seq0 = self._seq
+        self._quiet = False
+        deadline = time.monotonic() + 4.0
+        while self._seq == seq0 and time.monotonic() < deadline and not self._given_up():
+            self._ask_key()
+            with self._cond:
+                self._cond.wait_for(lambda: self._seq > seq0, 1.0)
+
+    def _ask_key(self) -> None:
+        srv = self._srv
+        if srv is None:
+            return
+        with contextlib.suppress(Exception):  # rate-limited by the server itself
+            self._loop.call_soon_threadsafe(lambda: srv._request_recovery_idr(reason="wsbot-wake"))
 
     def _fresh(self, seq0: int) -> bool:
         return self._frame is not None and self._seq > seq0
@@ -617,6 +643,13 @@ class IPhone:
                     dbg(
                         f"AU #{self.stats['aus']} kind={kind} bytes={len(au)} nals={_nal_types(au)}"
                     )
+                if self._quiet:
+                    self._want_key = True
+                    continue
+                if self._want_key:  # frames skipped: only a keyframe can restart decoding
+                    if kind == 1:
+                        continue
+                    self._want_key, codec = False, None
                 if codec is None or kind == 2:  # 2 = keyframe after a restart: fresh decoder
                     dbg(f"new HEVC decoder (kind={kind})")
                     codec = av.CodecContext.create("hevc", "r")
