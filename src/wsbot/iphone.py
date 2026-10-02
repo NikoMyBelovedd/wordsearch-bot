@@ -139,10 +139,12 @@ WAKE_KEY_S = 4.0  # waking from quiet: wait this long for a keyframe, then resta
 # can't reopen within REOPEN_GIVE_UP_S: stop the bot with an error, so AutomationHQ's
 # auto-restart takes over instead of the bot looping silently.
 STREAM_RESTART_FAILS = 3
+TUNNEL_CONNECT_S = 15.0  # connecting to one tunnel listed by tunneld
 # The stream server listens once its first stream start ends (it gives that 25 s)
 LISTEN_WAIT_S = 30.0
 FROZEN_REOPEN_S = 90.0
 REOPEN_GIVE_UP_S = 180.0
+REOPEN_MIN_TRIES = 3  # ...and at least this many tries (one can take ~2 min)
 ESCALATION_REOPENS = 2
 ESCALATION_WINDOW_S = 900.0
 # Where the phone connection comes from. "userspace" = pymobiledevice3's in-process tunnel:
@@ -308,16 +310,13 @@ class IPhone:
         self._escalations: list[float] = []
         self.width, self.height = 750, 1334  # screen px; read from the phone on open
         self.product_type = ""  # "iPhone18,3" = iPhone 17 (see ios_device.IPHONE_NAMES)
-        self._loop = asyncio.new_event_loop()
-        # ScreenStreamServer.serve() installs Ctrl-C handlers; only the main thread may.
-        self._loop.add_signal_handler = lambda *a, **k: None
-        self._loop.set_exception_handler(_quiet_resets)
-        threading.Thread(target=self._loop.run_forever, name="iphone-loop", daemon=True).start()
+        self._loop = self._new_loop()
         self._srv = None
         self._serve_task: asyncio.Task | None = None
         self._key_task: asyncio.Task | None = None
         self._log_task: asyncio.Task | None = None
         self._rsd = None
+        self._tunnel: tuple[str, int] | None = None  # the phone's RSD address via tunneld
         self._held: tuple[int, int] | None = None
         self._us = None  # pymobiledevice3 UserspaceRsdTunnel while one is open
         # frames
@@ -350,6 +349,7 @@ class IPhone:
         self._reopen_lock = threading.Lock()
         self._opens = 0  # successful reopens, so waiting threads can tell one happened
         self._reader: threading.Thread | None = None
+        self._reader_sock: socket.socket | None = None  # its /stream.bin connection
         self._head_bytes = 0
         self._aus_logged = 0
         self._published_logged = 0
@@ -432,6 +432,47 @@ class IPhone:
                 )
 
     # ---- session ------------------------------------------------------------------
+
+    @staticmethod
+    def _new_loop() -> asyncio.AbstractEventLoop:
+        loop = asyncio.new_event_loop()
+        # ScreenStreamServer.serve() installs Ctrl-C handlers; only the main thread may.
+        loop.add_signal_handler = lambda *a, **k: None
+        loop.set_exception_handler(_quiet_resets)
+        threading.Thread(target=loop.run_forever, name="iphone-loop", daemon=True).start()
+        return loop
+
+    def _retire_loop(self) -> None:
+        """Start the next session on a new event loop, like a fresh process would. The
+        old one can hold tasks of a dead session that nothing ends: the stream server's
+        own tunneld reconnect loop, its /stream.bin handlers (its teardown cancels them
+        only when it runs to the end, and with a dead tunnel it may not), tunneld
+        bridges. Those are cancelled (bounded) and the loop stopped."""
+        old, self._loop = self._loop, self._new_loop()
+
+        async def cancel_all() -> None:
+            me = asyncio.current_task()
+            tasks = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+            for t in tasks:
+                t.cancel()
+            if tasks:
+                await asyncio.wait(tasks, timeout=5)
+
+        try:
+            asyncio.run_coroutine_threadsafe(cancel_all(), old).result(10)
+        except Exception as exc:
+            dbg(f"old iphone loop cleanup: {exc!r}")
+        old.call_soon_threadsafe(old.stop)
+
+    def _drop_reader_conn(self) -> None:
+        """Make the frame reader leave its /stream.bin connection now. It reads with no
+        timeout (a still screen sends nothing for minutes), so a connection to a server
+        that's gone but never closed its side would hold it, and no reopen would ever
+        see a frame again; it reconnects to the new server's port by itself."""
+        sock = self._reader_sock
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
 
     def _call(self, coro, timeout: float):
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -519,7 +560,8 @@ class IPhone:
         self._closing.set()
         self._stop.set()
         with contextlib.suppress(Exception):
-            self._call(self._close(), 30)
+            self._call(self._close(), 60)
+        self._drop_reader_conn()
 
     def reopen(self, give_up_after: float | None = None) -> None:
         """Rebuild the session. If the phone is gone (the tunnel dropped for a while),
@@ -532,10 +574,14 @@ class IPhone:
                 return  # another thread just reopened it
             t0 = time.monotonic()
             next_note = 0.0
+            tries = 0
             while True:
                 log("RECOVERY", "reopening the iPhone USB session")
                 with contextlib.suppress(Exception):
-                    self._call(self._close(), 30)
+                    self._call(self._close(), 60)
+                self._retire_loop()
+                self._drop_reader_conn()
+                tries += 1
                 try:
                     self.open()
                     self._opens += 1
@@ -544,8 +590,14 @@ class IPhone:
                     if self._given_up() or isinstance(exc, TooOld):
                         raise
                     waited = time.monotonic() - t0
-                    if give_up_after is not None and waited >= give_up_after:
-                        raise IPhoneError(f"not back after {waited:.0f}s: {exc}") from exc
+                    if (
+                        give_up_after is not None
+                        and waited >= give_up_after
+                        and tries >= REOPEN_MIN_TRIES
+                    ):
+                        raise IPhoneError(
+                            f"not back after {waited:.0f}s and {tries} tries: {exc}"
+                        ) from exc
                     if waited >= next_note:
                         log("WARN", f"iPhone not back yet ({waited:.0f}s): {exc}")
                         next_note = waited + 60
@@ -568,7 +620,6 @@ class IPhone:
     async def _open(self) -> None:
         from pymobiledevice3.remote.core_device import screen_stream
         from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
-        from pymobiledevice3.tunneld.api import get_tunneld_devices
 
         # The phone sends frames only when the screen changes, so the server's 5 s
         # "no frames = stalled" watchdog restarted the stream whenever the board sat
@@ -599,7 +650,7 @@ class IPhone:
                 dbg(f"userspace tunnel traceback: {traceback.format_exc()}")
         if not rsds:
             log("DIAG", "using the tunneld service")
-            rsds = await get_tunneld_devices()
+            rsds = await self._tunneld_rsds()
         for r in rsds:
             props = {}
             with contextlib.suppress(Exception):
@@ -652,6 +703,7 @@ class IPhone:
             raise
         with contextlib.suppress(Exception):
             self.product_type = rsd.product_type or ""
+        self._note_tunnel(rsd)
 
         try:
             async with DeviceInfoService(rsd) as info:
@@ -717,6 +769,61 @@ class IPhone:
             "DEVICE",
             f"iPhone {rsd.udid}: USB stream + touch up, viewer http://127.0.0.1:{self.port}/",
         )
+
+    async def _tunneld_rsds(self) -> list:
+        """The phone's RSD through the tunneld helper, asked for afresh on every open:
+        after the helper restarts, the phone's tunnel comes back at a new address and
+        port (fd..::1). Each listed tunnel is tried on its own, with a timeout: one stale
+        or half-made tunnel (pymobiledevice3's get_tunneld_devices lets an OSError from
+        one end the whole list, and has no connect timeout) must not hide the good one."""
+        from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
+        from pymobiledevice3.tunneld.api import get_tunneld_tunnels
+
+        try:
+            tunnels = await asyncio.wait_for(get_tunneld_tunnels(), 10)
+        except Exception as exc:
+            raise NoTunnel(
+                "the iPhone helper (`pymobiledevice3 remote tunneld`) isn't answering: is it "
+                f"running? ({exc!r})"
+            ) from exc
+        dbg(f"tunneld lists: {tunnels}")
+        rsds = []
+        for udid, entries in tunnels.items():
+            if self.udid and udid != self.udid:
+                continue
+            for entry in reversed(entries):  # the newest last
+                address = (entry["tunnel-address"], entry["tunnel-port"])
+                rsd = RemoteServiceDiscoveryService(
+                    address,
+                    name=entry.get("interface"),
+                    auxiliary_metadata=entry.get("auxiliary-metadata"),
+                )
+                try:
+                    await asyncio.wait_for(rsd.connect(), TUNNEL_CONNECT_S)
+                except Exception as exc:
+                    log("WARN", f"iPhone tunnel {address} doesn't answer ({exc!r}); skipping it")
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(rsd.close(), 5)
+                    continue
+                rsds.append(rsd)
+                break  # one per phone
+        return rsds
+
+    def _note_tunnel(self, rsd) -> None:
+        """Log where the phone's tunnel is, and when it moved (the helper restarted)."""
+        address = getattr(getattr(rsd, "service", None), "address", None)
+        if address is None:
+            return
+        address = tuple(address)
+        if self._tunnel is not None and address != self._tunnel:
+            log(
+                "RECOVERY",
+                f"the iPhone's tunnel moved from {self._tunnel} to {address} (rebuilt: the "
+                "iPhone helper restarted, or the phone reconnected); using the new one",
+            )
+        else:
+            log("DIAG", f"iPhone tunnel at {address}")
+        self._tunnel = address
 
     async def _wait_listening(self, task: asyncio.Task) -> None:
         """The stream server opens its HTTP port only after the phone's stream is up.
@@ -785,6 +892,10 @@ class IPhone:
 
     async def _close(self) -> None:
         task, rsd = self._serve_task, self._rsd
+        # The stream server reconnects through tunneld by itself (a dropped tunnel) and
+        # then holds a newer RSD than ours: close that one too.
+        rebound = getattr(self._srv, "_rsd", None)
+        rebound = rebound if rebound is not None and rebound is not rsd else None
         for t in (self._key_task, self._log_task):
             if t is not None:
                 t.cancel()
@@ -792,15 +903,21 @@ class IPhone:
         self._srv = self._serve_task = self._rsd = None
         if task is not None:
             task.cancel()  # serve() stops the device-side streams in its finally
+            # asyncio.wait, not wait_for: on a timeout wait_for cancels serve() again,
+            # in the middle of its teardown (each step there waits out a dead tunnel),
+            # and its last step, closing the /stream.bin connections, never ran.
             with contextlib.suppress(BaseException):
-                await asyncio.wait_for(task, 20)
+                await asyncio.wait({task}, timeout=30)
         if self._us is not None:  # the tunnel owns its RSD; a reopen builds a fresh one
             tunnel, self._us = self._us, None
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(tunnel.aclose(), 15)
         elif rsd is not None:
             with contextlib.suppress(Exception):
-                await rsd.close()
+                await asyncio.wait_for(rsd.close(), 5)
+        if rebound is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(rebound.close(), 5)
 
     # ---- frozen picture ---------------------------------------------------------------
 
@@ -942,6 +1059,8 @@ class IPhone:
 
         conn = http.client.HTTPConnection("127.0.0.1", self.port)  # a static screen is silent
         try:
+            conn.connect()
+            self._reader_sock = conn.sock
             conn.request("GET", "/stream.bin")
             resp = conn.getresponse()
             self.stats["http"] = resp.status
@@ -1008,6 +1127,7 @@ class IPhone:
                             )
                     self._publish(frame)
         finally:
+            self._reader_sock = None
             conn.close()
 
     def _decoder(self, av):
@@ -1155,13 +1275,18 @@ class IPhone:
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
 
-        async with DvtProvider(self._rsd) as dvt, ProcessControl(dvt) as pc:
+        async with DvtProvider(self._live_rsd()) as dvt, ProcessControl(dvt) as pc:
             if op == "launch":
                 return await pc.launch(bundle, kill_existing=True)
             pid = await pc.process_identifier_for_bundle_identifier(bundle)
             if op == "kill" and pid:
                 await pc.kill(pid)
             return pid
+
+    def _live_rsd(self):
+        """The RSD the stream server uses now: after a tunnel drop it reconnects through
+        tunneld by itself, and ours then points at the dead tunnel."""
+        return getattr(self._srv, "_rsd", None) or self._rsd
 
     def _do(self, coro_fn, timeout: float = 30.0):
         """Run one input coroutine; reopen the session once if the phone went away."""

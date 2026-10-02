@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import pytest
 from pymobiledevice3 import lockdown, usbmux
-from pymobiledevice3.tunneld import api as tunneld_api
 
 import wsbot.iphone
 from wsbot.iphone import IPhone, NoTunnel, TooOld, check_ios, ios_version, too_old
@@ -100,10 +99,10 @@ def test_a_tunnel_to_an_ios_17_to_26_iphone_is_refused_with_its_version(usb, mon
     monkeypatch.setattr(wsbot.iphone, "TUNNEL_MODE", "tunneld")
     rsds = [FakeRsd(OLD, "26.5")]
 
-    async def get_tunneld_devices(*_, **__):
-        return rsds
+    async def tunneld_rsds(self):
+        return list(rsds)
 
-    monkeypatch.setattr(tunneld_api, "get_tunneld_devices", get_tunneld_devices)
+    monkeypatch.setattr(IPhone, "_tunneld_rsds", tunneld_rsds)
     phone = IPhone(OLD)
     with pytest.raises(TooOld, match=r"26\.5"):
         phone._call(phone._open(), 10)
