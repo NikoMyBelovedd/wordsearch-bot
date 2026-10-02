@@ -426,3 +426,49 @@ def test_change_scan_keeps_scores_only_for_the_same_pixels(monkeypatch):
         assert (score >= p.threshold) == (whole[0] >= p.threshold)
         if score >= p.threshold:
             assert (score, center) == whole
+
+
+def test_component_stats_are_opencvs():
+    """board._largest / _blobs: connectedComponentsWithStats' answers for less work."""
+    from wsbot.board import _blobs, _kernel, _largest
+
+    frames = [board_frame(), board_frame(9, 8)]
+    frames += [
+        cv2.resize(cv2.imread(str(p)), CALIB, interpolation=cv2.INTER_LINEAR)
+        for p in sorted((ROOT / "tests" / "data" / "screens").glob("*.jpg"))
+        if cv2.imread(str(p)).shape[1] == NATIVE[0]
+    ]
+    for img in frames:
+        mini = cv2.resize(native_of(img), (NATIVE[0] // 2, NATIVE[1] // 2))
+        white = cv2.inRange(mini, (235,) * 3, (255,) * 3)
+        white = cv2.morphologyEx(white, cv2.MORPH_OPEN, _kernel(mini.shape[1] / CALIB[0]))
+        n, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=4)
+        if n < 2:
+            assert _largest(white) is None
+        else:
+            i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            assert _largest(white) == tuple(int(v) for v in stats[i])
+        dark = cv2.inRange(img, (0, 0, 0), (90, 90, 90))
+        n, _, stats, _ = cv2.connectedComponentsWithStats(dark)
+        assert _blobs(dark) == [tuple(int(v) for v in s) for s in stats[1:n]]
+    empty = np.zeros((40, 30), np.uint8)
+    assert _largest(empty) is None and _blobs(empty) == []
+
+
+def test_letter_scores_are_remembered_per_glyph_until_a_letter_is_learned(tmp_path: Path):
+    import shutil
+
+    from wsbot.letters import LetterReader
+
+    folder = tmp_path / "letters"
+    shutil.copytree(ROOT / "templates" / "letters" / "ref", folder / "ref")
+    reader = LetterReader(folder)
+    glyph, other = reader.templates[5][1].copy(), reader.templates[9][1].copy()
+    first = reader.ranked(glyph)
+    assert first[0][1] == reader.templates[5][0]
+    reader._mat = np.zeros_like(reader._mat)  # a recomputed list would now be all zeros
+    assert reader.ranked(glyph) == first and reader.ranked(glyph.copy()) == first
+    assert reader.ranked(other)[0][0] == 0.0  # not remembered: scored (by the zeros)
+    # learning a letter forgets every remembered list (they're one template short)
+    reader.learn("Q", glyph)
+    assert reader.ranked(glyph)[0] == (pytest.approx(1.0, abs=1e-5), "Q")
