@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -76,6 +77,42 @@ def _hw_device() -> str | None:
 # less memory (measured on Windows; video, touch and recovery unchanged).
 # WSBOT_AUDIO=1 keeps it.
 NO_AUDIO = not os.environ.get("WSBOT_AUDIO")
+
+
+# EXPERIMENT (off by default): ask the phone for fewer frames. It streams ~58 fps
+# while the game animates; receiving, relaying (tunneld + Apple's USB service) and
+# decoding all scale with that. Its rate controller lowers the frame rate when the
+# receiver reports one-way delay / jitter (an old pymobiledevice3 bug did exactly
+# that by accident). WSBOT_STREAM_PACE="owrd=40,jitter=20" (ms) adds that much to
+# what our RCTL feedback reports; the file local/stream_pace in the repo works too.
+def _stream_pace() -> dict[str, int]:
+    raw = os.environ.get("WSBOT_STREAM_PACE")
+    if raw is None:
+        f = Path(__file__).resolve().parents[2] / "local" / "stream_pace"
+        raw = f.read_text().strip() if f.is_file() else ""
+    out: dict[str, int] = {}
+    for part in raw.replace(";", ",").split(","):
+        key, _, val = part.partition("=")
+        if key.strip() in ("owrd", "jitter") and val.strip().isdigit():
+            out[key.strip()] = int(val.strip())
+    return out
+
+
+def _paced_rctl(build, owrd_ms: int, jitter_ms: int):
+    """Wraps ScreenStreamServer._build_rctl_packet: w4 = (arrival ms << 16) | jitter
+    (24 kHz units) at bytes 24..27."""
+    import struct
+
+    def wrapped(self) -> bytes:
+        pkt = bytearray(build(self))
+        (w4,) = struct.unpack_from("!I", pkt, 24)
+        arrival = ((w4 >> 16) + owrd_ms) & 0xFFFF
+        jitter = min(0xFFFF, (w4 & 0xFFFF) + jitter_ms * 24)
+        struct.pack_into("!I", pkt, 24, (arrival << 16) | jitter)
+        return bytes(pkt)
+
+    wrapped._wsbot_paced = True  # type: ignore[attr-defined]
+    return wrapped
 
 
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
@@ -139,7 +176,7 @@ class TooOld(IPhoneError):
 
 
 def ios_version(text: str | None) -> tuple[int, ...]:
-    """"26.4.1" -> (26, 4, 1); () when unknown."""
+    """ "26.4.1" -> (26, 4, 1); () when unknown."""
     parts = []
     for part in (text or "").split("."):
         if not part.isdigit():
@@ -472,6 +509,13 @@ class IPhone:
         # "no frames = stalled" watchdog restarted the stream whenever the board sat
         # still (the bot thinking, a probe) and dropped the touches sent meanwhile.
         screen_stream._STALL_RESTART_SECS = STALL_RESTART_S
+        pace = _stream_pace()
+        build = getattr(ScreenStreamServer, "_build_rctl_packet", None) if pace else None
+        if build is not None and not getattr(build, "_wsbot_paced", False):
+            ScreenStreamServer._build_rctl_packet = _paced_rctl(  # type: ignore[method-assign]
+                build, pace.get("owrd", 0), pace.get("jitter", 0)
+            )
+            log("LOG", f"diag: stream pacing experiment on: {pace}")
 
         await self._close()
         t_open = time.monotonic()
