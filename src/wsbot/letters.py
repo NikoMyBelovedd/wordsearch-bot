@@ -69,7 +69,7 @@ def _unit(img: np.ndarray) -> tuple[np.ndarray, bool]:
     TM_CCOEFF_NORMED of two same-size images is the dot product of these vectors, so
     one matrix product scores a glyph against every template at once.
     """
-    v = img.astype(np.float64).ravel()
+    v = img.astype(np.float32).ravel()
     v -= v.mean()
     n = float(np.linalg.norm(v))
     return (v / n, False) if n > 1e-9 else (v, True)
@@ -84,6 +84,7 @@ class LetterReader:
         # ranked() scores against these in one matrix product: one matchTemplate call
         # per template took 6.3 s a 10x9 board on a 2-core laptop (517 templates), and
         # boards are read twice per level start and after every pause.
+        # float32 rows, stacked once (new ones appended when a glyph is learned)
         self._rows: list[np.ndarray] = []
         self._flat: list[bool] = []
         self._mat: np.ndarray | None = None
@@ -106,15 +107,16 @@ class LetterReader:
         row, flat = _unit(tmpl)
         self._rows.append(row)
         self._flat.append(flat)
-        self._mat = None
 
     def ranked(self, norm: np.ndarray) -> list[tuple[float, str]]:
         """Best score per letter, highest first (same scores as matchTemplate)."""
-        if self._mat is None:
-            self._mat = np.stack(self._rows)
+        if self._rows:  # stack new rows once, then keep only the matrix (~9 MB, not 36)
+            new = np.stack(self._rows)
+            self._mat = new if self._mat is None else np.concatenate([self._mat, new])
+            self._rows = []
             self._flat_idx = np.flatnonzero(self._flat)
         g, flat = _unit(norm)
-        scores = np.zeros(len(self._rows)) if flat else self._mat @ g
+        scores = np.zeros(len(self._flat)) if flat else self._mat @ g
         scores[self._flat_idx] = 1.0  # what matchTemplate says for a flat template
         best: dict[str, float] = {}
         for (letter, _), s in zip(self.templates, scores.tolist(), strict=True):

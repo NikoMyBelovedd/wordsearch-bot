@@ -246,3 +246,16 @@ def test_idle_watcher_quiets_the_stream_and_wakes_it(tmp_path, monkeypatch):
         time.sleep(0.02)
     w.stop()
     assert calls[:2] == [True, False]
+
+
+def test_deferred_module_loads_on_first_use(monkeypatch):
+    import sys
+
+    from wsbot.slim import defer
+
+    monkeypatch.delitem(sys.modules, "json.tool", raising=False)
+    defer("json.tool")
+    stub = sys.modules["json.tool"]
+    assert stub.Question.__name__ == "Question"  # annotation-only name, no load
+    assert callable(stub.main)  # first real use loads the real module
+    assert sys.modules["json.tool"] is not stub

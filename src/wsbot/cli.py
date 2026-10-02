@@ -50,6 +50,9 @@ def _memory_report() -> None:
 
 
 def main() -> None:
+    from .slim import slim
+
+    slim()
     _one_thread_each()
     _memory_report()
     p = argparse.ArgumentParser(prog="wsbot", description="Word Search Explorer auto-solver")
