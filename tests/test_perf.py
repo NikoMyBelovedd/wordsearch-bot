@@ -284,3 +284,26 @@ def test_toast_eye_finds_the_toast_in_the_watchers_frames(tmp_path):
     assert w2.cover_seen
     lo, hi = w2.cover_span
     assert lo < y + th // 2 < hi
+
+
+def test_a_popup_that_goes_still_still_gets_a_full_look(counted, tmp_path, monkeypatch):
+    """The last new frame got only a partial look; the picture then stays put."""
+    a = np.full((CALIB[1], CALIB[0], 3), (20, 140, 60), np.uint8)
+    b = a.copy()
+    b[100:300] = 200
+    frames = [Shot(1, native_of(a), CALIB), Shot(2, native_of(b), CALIB)]
+    w = make_watcher(frames, tmp_path)
+    now = [100.0]
+    monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
+    w._tick()  # full look at frame 1
+    now[0] += 0.2
+    w._tick()  # frame 2 is new but no full look is due: partial
+    assert counted.count("next_level") == 1
+    for _ in range(5):  # frame 2 stays on screen
+        now[0] += 0.2
+        w._tick()
+    assert counted.count("next_level") == 2  # looked at in full once it was due
+    for _ in range(10):
+        now[0] += 0.2
+        w._tick()
+    assert counted.count("next_level") == 2  # and never again for the same picture
