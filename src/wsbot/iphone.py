@@ -77,6 +77,22 @@ def _hw_device() -> str | None:
 # EXPERIMENT (off unless set): don't start the phone's audio stream. pymobiledevice3
 # starts it as a session-liveness signal like Xcode; the bot never listens to it.
 NO_AUDIO = bool(os.environ.get("WSBOT_NO_AUDIO"))
+# EXPERIMENT (off unless set): offer the phone lower bitrate caps (kbps) when the
+# video stream is negotiated. Fewer bytes = fewer packets for the tunnel, the Apple
+# service and the bot to move; the bot reads a mostly still UI, not a movie.
+STREAM_KBPS = int(os.environ.get("WSBOT_STREAM_KBPS") or 0)
+
+
+def _cap_stream_bitrate(kbps: int) -> None:
+    from pymobiledevice3.remote.core_device import media_stream_offer as offer
+
+    tiers = offer._DEFAULT_VIDEO_BITRATE_TIERS
+    capped = tuple(
+        (kind, min(bps, kbps * 1000) if kind == 0 else bps, cap) for kind, bps, cap in tiers
+    )
+    offer.build_media_blob_video.__kwdefaults__["bitrate_tiers"] = capped
+
+
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
 # After a lost packet the stream server holds every frame until the phone sends a
 # keyframe. It asks once; when the phone ignores that, the picture stays frozen while
@@ -504,6 +520,8 @@ class IPhone:
         except Exception as exc:
             log("WARN", f"display info failed ({exc!r}); assuming {self.width}x{self.height}")
             dbg(f"display info traceback: {traceback.format_exc()}")
+        if STREAM_KBPS > 0:
+            _cap_stream_bitrate(STREAM_KBPS)
         srv = ScreenStreamServer(rsd, bind="127.0.0.1", http_port=self.port)
         if NO_AUDIO:
 
@@ -613,12 +631,16 @@ class IPhone:
     async def _pace(self, srv, per_s: float) -> None:
         """The phone's frame rate in the log (every minute while an experiment is on,
         else every 10), and with STREAM_PACE frame receipts on a slow timer."""
-        experiment = per_s > 0 or NO_AUDIO
+        experiment = per_s > 0 or NO_AUDIO or STREAM_KBPS > 0
         if experiment:
-            log("DIAG", f"stream experiment: pace={per_s:g}/s no_audio={NO_AUDIO}")
+            log(
+                "DIAG",
+                f"stream experiment: pace={per_s:g}/s no_audio={NO_AUDIO} kbps={STREAM_KBPS}",
+            )
         every = 60 if experiment else 600
         loop = asyncio.get_running_loop()
         last_t, last_aus, last_dec = loop.time(), self.stats["aus"], self.frames_decoded
+        last_bytes = self.stats["bytes"]
         while True:
             await asyncio.sleep(1.0 / per_s if per_s > 0 else 5.0)
             sock, dest = srv._active_sock, srv._rtcp_dest
@@ -629,14 +651,15 @@ class IPhone:
                         await sock.sendto(srv._build_rctl_packet(), *dest)
             now = loop.time()
             if now - last_t >= every:
-                aus, dec = self.stats["aus"], self.frames_decoded
+                aus, dec, nbytes = self.stats["aus"], self.frames_decoded, self.stats["bytes"]
                 log(
                     "DIAG",
-                    f"stream: phone sent {(aus - last_aus) / (now - last_t):.1f} frames/s, "
+                    f"stream: phone sent {(aus - last_aus) / (now - last_t):.1f} frames/s "
+                    f"({(nbytes - last_bytes) * 8 / 1000 / (now - last_t):.0f} kbps), "
                     f"decoded {(dec - last_dec) / (now - last_t):.1f}/s, "
                     f"{self._uncollapsed} shrunken so far",
                 )
-                last_t, last_aus, last_dec = now, aus, dec
+                last_t, last_aus, last_dec, last_bytes = now, aus, dec, nbytes
 
     async def _keyframe_watchdog(self, srv) -> None:
         loop = asyncio.get_running_loop()
