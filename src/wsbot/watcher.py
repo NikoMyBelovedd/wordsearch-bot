@@ -21,7 +21,8 @@ import os
 import threading
 import time
 from collections import Counter, deque
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -78,6 +79,26 @@ SCAN_EVERY_S = 1.2 if LOW_POWER else 0.8
 REST_PERIOD_S = 1.0
 REST_SCAN_S = 3.0
 
+# Scaled copies of a template ("scales" in popups.json) are scored only in a window this
+# many half-res px around where the template itself was found: the game's buttons pulse
+# (Next Level 1.0x-1.10x), so one size alone missed them for seconds at a time.
+VARIANT_PAD = 24
+# Never sure we're still in the game: no board, no known game screen this long. Then the
+# bot stops tapping blind (on the iPhone home screen a blind tap opened Apple's Watch app).
+BLIND_TAP_WINDOW_S = 20.0
+# A known screen we only wait on (level complete, loading) that stays this long counts
+# as unknown: the game is stuck on it.
+WAIT_STUCK_S = 90.0
+# Unknown screen (not the board, nothing known) this long: relaunch the game; still
+# unknown this long after that: restart it and reopen the phone connection; still
+# unknown this long after that: exit with an error so AutomationHQ restarts the bot.
+UNKNOWN_RELAUNCH_S = 45.0
+UNKNOWN_RESTART_S = 60.0
+UNKNOWN_GIVE_UP_S = 120.0
+RELAUNCH_COOLDOWN_S = 30.0  # home screen seen again right after a relaunch: give it time
+UNKNOWN_DUMP_MIN_S = 10.0  # unknown screens are saved once each, at most this often
+UNKNOWN_SAME = 6.0  # thumbnails this close (mean abs difference) are the same screen
+
 
 def board_visible_in(shot: Shot, expected: tuple[int, int, int, int] | None) -> bool:
     """The level's board is on screen (see PopupWatcher._board_visible)."""
@@ -119,6 +140,19 @@ class Popup:
     covers: tuple[int, int] | None = None
     # Shows during a level (the bonus jar): the board hidden under it isn't the level ending
     mid_level: bool = False
+    # Scaled copies (half-res), scored near where `template` was found (see VARIANT_PAD)
+    variants: list[np.ndarray] = field(default_factory=list)
+    group: str | None = None  # entries of one group share a cooldown (one button, many looks)
+    # tap False: a known screen to wait on. tap_after: ...unless it stays this long, then tap
+    tap_after: float = 0.0
+    relaunch: bool = False  # not the game (the iPhone home screen): relaunch it, never tap
+    system: bool = False  # the phone's own UI, not the game: no proof we're in the game
+    # A whole screen of its own (level complete, home screen): never there while the
+    # level's board is in view, so full scans then skip it (~2.5 ms each)
+    off_board: bool = False
+    # avoid zone as (left, top, right, bottom) px from the match center, instead of avoid_pad
+    avoid_box: tuple[int, int, int, int] | None = None
+    seen_since: float = 0.0  # when this entry started matching (0 = not matching)
     coarse: np.ndarray | None = None  # quarter-res template for match()'s first look
     coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
@@ -146,6 +180,12 @@ def load_popups(folder: Path) -> list[Popup]:
             )
             how = "gray" if gray_ok else "color"
         quarter = look(quarter, how)
+        variants = [
+            cv2.resize(small, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+            for s in e.get("scales", [])
+            if s != 1.0
+        ]
+        pad = e.get("avoid_pad", (40, 40))
         popups.append(
             Popup(
                 name=e["name"],
@@ -160,11 +200,18 @@ def load_popups(folder: Path) -> list[Popup]:
                 blocking=e.get("blocking", True),
                 holdoff=e.get("holdoff", 0.0),
                 avoid=e.get("avoid", False),
-                avoid_pad=tuple(e.get("avoid_pad", (40, 40))),
+                avoid_pad=tuple(pad[:2]),
                 covers=tuple(e["covers"]) if "covers" in e else None,
                 mid_level=e.get("mid_level", False),
                 coarse=quarter if min(quarter.shape[:2]) >= COARSE_MIN else None,
                 coarse_look=how,
+                variants=variants,
+                group=e.get("group"),
+                tap_after=e.get("tap_after", 0.0),
+                relaunch=e.get("relaunch", False),
+                system=e.get("system", False),
+                off_board=e.get("off_board", False),
+                avoid_box=tuple(e["avoid_box"]) if "avoid_box" in e else None,
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -212,6 +259,43 @@ def match(
     return float(score), (round(cx), round(cy))
 
 
+def match_variants(
+    small_frame: np.ndarray, popup: Popup, found: tuple[float, tuple[int, int]]
+) -> tuple[float, tuple[int, int]]:
+    """`found` (match() of the template itself), or a scaled copy's score and center if
+    one scores higher in a window around that spot. A pulsing button is still found
+    by the template at its spot; only its score drops (0.47 at 1.10x)."""
+    best = found
+    if not popup.variants:
+        return best
+    h, w = small_frame.shape[:2]
+    cx, cy = found[1][0] * SCALE, found[1][1] * SCALE
+    for tmpl in popup.variants:
+        th, tw = tmpl.shape[:2]
+        x0, y0 = max(0, round(cx - tw / 2 - VARIANT_PAD)), max(0, round(cy - th / 2 - VARIANT_PAD))
+        x1, y1 = min(w, round(cx + tw / 2 + VARIANT_PAD)), min(h, round(cy + th / 2 + VARIANT_PAD))
+        if x1 - x0 < tw or y1 - y0 < th:
+            continue
+        res = cv2.matchTemplate(small_frame[y0:y1, x0:x1], tmpl, cv2.TM_CCOEFF_NORMED)
+        _, score, _, (lx, ly) = cv2.minMaxLoc(res)
+        if score > best[0]:
+            center = (round((x0 + lx + tw / 2) / SCALE), round((y0 + ly + th / 2) / SCALE))
+            best = (float(score), center)
+    return best
+
+
+def top_match(
+    popups: list[Popup], scores: dict[str, tuple[float, tuple[int, int]]]
+) -> tuple[Popup, float, tuple[int, int]] | None:
+    """The entry that owns a picture: the first in list (priority) order that matches.
+    Ad buttons (avoid) never do; they only mark no-tap zones."""
+    for popup in popups:
+        score, center = scores[popup.name]
+        if not popup.avoid and score >= popup.threshold:
+            return popup, score, center
+    return None
+
+
 class PopupWatcher(threading.Thread):
     def __init__(self, device: Device, templates: Path, package: str, diagnostics: Path) -> None:
         super().__init__(daemon=True, name="popup-watcher")
@@ -257,6 +341,17 @@ class PopupWatcher(threading.Thread):
         self._last_unknown_dump = 0.0
         self._last_app_check = 0.0
         self._last_score_log = 0.0
+        # Stuck on screens it doesn't know (see _escalate) and the end of the line
+        self.on_fatal: Callable[[str], None] | None = None  # the bot: stop, exit non-zero
+        self.fatal: str | None = None
+        self.last_known = time.monotonic()  # the board or a known game screen last seen
+        self.system_seen = 0.0  # the phone's own UI (home screen, an alert) last seen
+        self._group_hit: dict[str, float] = {}  # group -> its last action (shared cooldown)
+        self._dumped: deque[np.ndarray] = deque(maxlen=40)  # thumbnails of saved unknowns
+        self._esc_step = 0
+        self._esc_t = 0.0
+        self._esc_relaunches: deque[float] = deque(maxlen=8)
+        self._last_relaunch = 0.0
 
     # ---- API for the main thread -------------------------------------------
 
@@ -298,6 +393,9 @@ class PopupWatcher(threading.Thread):
                 if not quiet:  # nobody looks for a while: stop decoding the phone's video
                     quiet = True
                     self._set_quiet(True)
+                # Nobody looks: nothing is "unknown for long" (a 30 min break read as
+                # "board hidden 1806s" and counted toward giving up)
+                self._hidden_since, self.last_known, self._esc_step = None, time.monotonic(), 0
                 self.stop_event.wait(1.0)
                 continue
             if quiet:
@@ -339,6 +437,12 @@ class PopupWatcher(threading.Thread):
         """True right after the watcher tapped something: give that popup time to go."""
         return time.monotonic() - self.last_action < ACTION_SETTLE_S
 
+    def blind_taps_ok(self) -> bool:
+        """May the bot tap blind to clear an unknown popup? Only while we know we're in
+        the game: on the iPhone home screen a blind tap opened Apple's Watch app."""
+        now = time.monotonic()
+        return now - self.last_known < BLIND_TAP_WINDOW_S and now - self.system_seen > 3.0
+
     def _tick(self) -> None:
         t0 = time.monotonic()
         shot = self.device.shot()
@@ -365,10 +469,13 @@ class PopupWatcher(threading.Thread):
         if fresh or (self._full_shot is not shot and self._full_due(now)):
             self._score(shot, now)
         matched = self._handle_popups(now)
+        if self.board_visible:
+            self.last_known = now
         if matched or self.board_visible:
             self._hidden_since = None
         else:
             self._check_unknown(shot, now)
+        self._escalate(now)
 
         took = time.monotonic() - t0
         if took > 2.0:
@@ -406,6 +513,8 @@ class PopupWatcher(threading.Thread):
         for popup in self.popups:
             if not full and not (popup.covers and not self._eye_on):
                 continue
+            if popup.off_board and self.board_visible and self.expected_panel is not None:
+                continue
             try:
                 coarse = shot.coarse_as(popup.coarse_look)
                 self._scores[popup.name] = match(shot.small, popup, coarse)
@@ -414,6 +523,14 @@ class PopupWatcher(threading.Thread):
                 continue
             looked.append(popup)
         self._looked = looked
+        self._score_variants(shot, looked)
+
+    def _score_variants(self, shot: Shot, looked: list[Popup]) -> None:
+        for popup in looked:
+            if popup.variants and popup.name in self._scores:
+                self._scores[popup.name] = match_variants(
+                    shot.small, popup, self._scores[popup.name]
+                )
 
     def _handle_popups(self, now: float) -> bool:
         """Act on the highest-priority popup that is on screen. True if any matched.
@@ -430,10 +547,12 @@ class PopupWatcher(threading.Thread):
                 continue
             if score >= popup.threshold:
                 popup.streak += 1
+                popup.seen_since = popup.seen_since or now
                 if hit is None:
                     hit = (popup, score, center)
             else:
                 popup.streak = 0
+                popup.seen_since = 0.0
         if now - self._last_score_log > 1.0:
             self._last_score_log = now
             top = sorted(scores, reverse=True)[:4]
@@ -447,21 +566,34 @@ class PopupWatcher(threading.Thread):
         self.last_match = now
         if popup.mid_level:
             self.mid_level_seen = now
+        if popup.system:
+            self.system_seen = now  # not the game: no blind taps, and it's not "known"
+        elif popup.tap or popup.tap_after or now - popup.seen_since < WAIT_STUCK_S:
+            self.last_known = now
         # The top match owns this frame even while cooling down or unconfirmed, so a
         # lower-priority button (like a close X) never jumps ahead of it.
-        if popup.streak < popup.confirm or now - popup.last_hit < popup.cooldown:
+        group = popup.group or popup.name
+        if popup.streak < popup.confirm or now - self._group_hit.get(group, 0.0) < popup.cooldown:
             return True
         # Closing the bonus popup while its claimed coins still fly leaves the game
         # ignoring every touch until a restart. It closes itself once they land.
         if now - self._last_tap < popup.holdoff:
             return True
-        popup.last_hit = now
+        popup.last_hit = self._group_hit[group] = now
         self.hits[popup.name] += 1
-        if popup.tap or not popup.covers:  # a toast left alone is logged by _note_cover
-            log("WATCHER", f"{popup.name} score={score:.2f} at {center}")
+        if popup.relaunch:
+            self._relaunch_game(f"{popup.name} on screen (score {score:.2f}): not in the game")
+            return True
+        tap = popup.tap or (popup.tap_after > 0 and now - popup.seen_since >= popup.tap_after)
+        waiting = not popup.tap and not popup.covers
+        # A screen to wait on is logged once per appearance, not every cooldown
+        if tap or (waiting and popup.seen_since > self._group_hit.get(f"{group}:logged", -1.0)):
+            self._group_hit[f"{group}:logged"] = now
+            note = " (waiting)" if waiting and not tap else ""
+            log("WATCHER", f"{popup.name} score={score:.2f} at {center}{note}")
         if popup.level_done:
             self.level_done.set()
-        if popup.tap:
+        if tap:
             if popup.blocking:
                 self.last_action = now
             self._last_tap = now
@@ -526,11 +658,15 @@ class PopupWatcher(threading.Thread):
         """Keep a no-tap zone over an avoid-template (an ad button) while it's visible."""
         zone = None
         if center is not None:
-            th, tw = popup.template.shape[:2]
-            hw = tw / SCALE / 2 + popup.avoid_pad[0]
-            hh = th / SCALE / 2 + popup.avoid_pad[1]
             cx, cy = center
-            zone = (round(cx - hw), round(cy - hh), round(cx + hw), round(cy + hh))
+            if popup.avoid_box is not None:
+                left, top, right, bottom = popup.avoid_box
+                zone = (cx + left, cy + top, cx + right, cy + bottom)
+            else:
+                th, tw = popup.template.shape[:2]
+                hw = tw / SCALE / 2 + popup.avoid_pad[0]
+                hh = th / SCALE / 2 + popup.avoid_pad[1]
+                zone = (round(cx - hw), round(cy - hh), round(cx + hw), round(cy + hh))
             if popup.streak == 0:
                 log("WATCHER", f"{popup.name} on screen: no taps in {zone}")
             popup.streak += 1
@@ -543,11 +679,86 @@ class PopupWatcher(threading.Thread):
             self._hidden_since = now
             return
         hidden = now - self._hidden_since
-        if hidden > UNKNOWN_AFTER_S and now - self._last_unknown_dump > 30:
-            self._last_unknown_dump = now
-            path = self.diagnostics / f"unknown_popup_{time.strftime('%Y%m%d_%H%M%S')}.png"
-            imwrite(path, shot.calib)
-            log("WARN", f"board hidden {hidden:.0f}s with no known popup -> saved {path.name}")
+        if hidden <= UNKNOWN_AFTER_S or now - self._last_unknown_dump < UNKNOWN_DUMP_MIN_S:
+            return
+        # Once per screen: the same unknown screen every 30 s filled the folder.
+        thumb = shot.thumb
+        if any(np.abs(thumb - t).mean() < UNKNOWN_SAME for t in self._dumped):
+            return
+        self._dumped.append(thumb)
+        self._last_unknown_dump = now
+        path = self.diagnostics / f"unknown_popup_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        imwrite(path, shot.calib)
+        log("WARN", f"board hidden {hidden:.0f}s with no known popup -> saved {path.name}")
+
+    # ---- not in the game / stuck ------------------------------------------------
+
+    def _relaunch_game(self, why: str, *, force: bool = False) -> None:
+        """Bring the game back (iPhone: kill + launch over USB). Never a tap: on the home
+        screen a tap opens whatever app is under it."""
+        now = time.monotonic()
+        if not force and now - self._last_relaunch < RELAUNCH_COOLDOWN_S:
+            return
+        self._last_relaunch = now
+        log("RECOVERY", f"{why}; relaunching the game")
+        if getattr(self.device, "dry_run", False):
+            return
+        try:
+            self.device.app_start(self.package)
+        except Exception as exc:
+            log("ERROR", f"relaunching the game failed: {exc!r}")
+
+    def _escalate(self, now: float) -> None:
+        """Never sit on a screen it doesn't know. The bot's blind taps get the first
+        BLIND_TAP_WINDOW_S; then, step by step: relaunch the game, restart it and the
+        phone connection, and finally stop with an error (AutomationHQ restarts the bot)."""
+        if self._esc_step and self.last_known > self._esc_t:
+            log("RECOVERY", "back in the game")
+            self._esc_step = 0
+        if getattr(self.device, "view_stale", lambda: False)():
+            return  # a frozen picture isn't the screen (iphone.py recovers the stream)
+        unknown = now - self.last_known
+        dry = getattr(self.device, "dry_run", False)
+        if self._esc_step == 0 and unknown >= UNKNOWN_RELAUNCH_S:
+            self._esc_step, self._esc_t = 1, now
+            recent = [t for t in self._esc_relaunches if now - t < 1200]
+            self._esc_relaunches.append(now)
+            if len(recent) >= 3:  # relaunched, got back, lost again: over and over
+                self._fatal(
+                    f"lost the game {len(recent) + 1} times in 20 min (unknown screen); "
+                    "stopping so the bot can be restarted"
+                )
+                return
+            self._relaunch_game(f"unknown screen for {unknown:.0f}s", force=True)
+        elif self._esc_step == 1 and now - self._esc_t >= UNKNOWN_RESTART_S:
+            self._esc_step, self._esc_t = 2, now
+            log(
+                "RECOVERY",
+                f"still not the game after {unknown:.0f}s; restarting it and the phone link",
+            )
+            if not dry:
+                try:
+                    self.device.reconnect()
+                    self.device.app_stop(self.package)
+                    time.sleep(1.0)
+                    self.device.app_start(self.package)
+                except Exception as exc:
+                    log("ERROR", f"restarting the game failed: {exc!r}")
+        elif self._esc_step == 2 and now - self._esc_t >= UNKNOWN_GIVE_UP_S:
+            self._esc_step = 3
+            self._fatal(
+                f"stuck on a screen it doesn't know for {unknown / 60:.0f} min; "
+                "stopping so the bot can be restarted"
+            )
+
+    def _fatal(self, message: str) -> None:
+        if self.fatal is not None:
+            return
+        self.fatal = message
+        if self.on_fatal is None:
+            log("ERROR", message)
+        else:
+            self.on_fatal(message)
 
     def _ensure_foreground(self) -> None:
         pkg = self.device.foreground()
