@@ -517,11 +517,7 @@ class Bot:
             words = self._learned_path.read_text(encoding="utf-8").split()
         except OSError:
             return
-        # Before learn-1 the learner kept only the longest of nested lines, so a theme
-        # word next to a found letter was saved with that letter (FKICKBOARD, WALKMANR,
-        # SSORROWFUL) and the word itself stayed unknown. Try each one-letter trim too.
-        trims = [t for w in words for t in (w[1:], w[:-1]) if len(t) >= LEARN_MIN_LEN]
-        for w in words + trims:
+        for w in _with_trims(words):
             if w not in self.words.rank:
                 self.words.add(w, LEARNED_RANK)
         log("WORDS", f"{len(words)} learned theme words")
@@ -597,8 +593,9 @@ class Bot:
         if len(fresh) > 2 * len(covered):
             dbg(f"learn: skipped {words}: {len(fresh)} cells lit vs {len(covered)}")
             return
-        for w in words:
-            self.words.add(w, LEARNED_RANK)
+        for w in _with_trims(words):
+            if w not in self.words.rank:
+                self.words.add(w, LEARNED_RANK)
         try:
             self._learned_path.parent.mkdir(exist_ok=True)
             with self._learned_path.open("a", encoding="utf-8") as f:
@@ -1105,6 +1102,16 @@ def _whole_run(hit: Hit, lit: set[tuple[int, int]]) -> bool:
     (r0, c0), (r1, c1) = cells[0], cells[-1]
     dr, dc = (r1 - r0) // (len(cells) - 1), (c1 - c0) // (len(cells) - 1)
     return (r0 - dr, c0 - dc) not in lit and (r1 + dr, c1 + dc) not in lit
+
+
+def _with_trims(words: list[str]) -> list[str]:
+    """Learned lines plus each one trimmed by a letter at either end. A theme word that
+    ends next to another find's first letter can't be told from the line through it:
+    BURANO ran into MURANO's M and only BURANOM qualified (its last cell was lit by the
+    same pass). Before learn-1 a word next to a found letter was saved with that letter
+    too (FKICKBOARD, WALKMANR, SSORROWFUL). The trims cost a swipe on boards that have
+    them, and only in memory: the file keeps what was learned."""
+    return words + [t for w in words for t in (w[1:], w[:-1]) if len(t) >= LEARN_MIN_LEN]
 
 
 def path_cells(hit: Hit) -> list[tuple[int, int]]:

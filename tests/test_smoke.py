@@ -185,3 +185,16 @@ def test_wordlist_has_the_theme_words_the_old_one_missed():
         "SYMBIOTIC SHIPWRECK MILKSHAKE PORCUPINE FACEBOOK WOODBLOCK KICKBOARD"
     ).split():
         assert w in words.rank, w
+
+
+def test_a_word_ending_at_another_finds_first_letter_is_tried_trimmed(tmp_path: Path):
+    """Level 1852: BURANO ran into MURANO's M; only BURANOM qualified, so the next board
+    must also try BURANO (in this run, not just after a restart)."""
+    grid = ["BURANOMWY", "QQQQQQUQQ", "QQQQQQRQQ", "QQQQQQAQQ", "QQQQQQNQQ", "QQQQQQOQQ"]
+    fresh = {(0, c) for c in range(7)} | {(r, 6) for r in range(1, 6)}
+    bot = _learner(tmp_path, grid, set())
+    bot.pass_fired = [h for h in bot.pass_fired if h.word in ("BURANOM", "MONARUB")]
+    bot._lit_cells = lambda board: fresh
+    bot._learn(None, set(), False)
+    assert set(bot._learned_path.read_text().split()) == {"BURANOM", "MONARUB"}
+    assert "BURANO" in bot.words.rank and "BURANO" in {h.word for h in bot.words.solve(grid)}
