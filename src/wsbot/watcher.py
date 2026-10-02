@@ -62,6 +62,9 @@ def _env_float(name: str, default: float) -> float:
 # matching board reads, a button that stays put). WSBOT_FPS lowers it on weak PCs.
 MAX_FPS = max(1.0, _env_float("WSBOT_FPS", 5.0))
 FULL_EVERY_S = 1.0  # board fully in view: the whole popup list this often
+# Otherwise (a popup, a level change) this often: the whole list was ~45% of a bot's
+# CPU at 5 looks a second, and a button tapped 0.2 s later costs nothing.
+SCAN_EVERY_S = 0.4
 
 
 def board_visible_in(shot: Shot, expected: tuple[int, int, int, int] | None) -> bool:
@@ -349,12 +352,10 @@ class PopupWatcher(threading.Thread):
         """Match the popup templates against a new picture. While the level's board is
         fully in view nothing can be over it but the toast (popups dim or hide the
         board, so it stops being "visible" the frame they show), so then the whole list
-        is checked only every FULL_EVERY_S; the rest of the time, every new frame."""
-        full = (
-            not self.board_visible
-            or self.expected_panel is None
-            or now - self._last_full >= FULL_EVERY_S
-        )
+        is checked only every FULL_EVERY_S; the rest of the time every SCAN_EVERY_S.
+        In between, only the toast (unless the eye watches it)."""
+        in_view = self.board_visible and self.expected_panel is not None
+        full = now - self._last_full >= (FULL_EVERY_S if in_view else SCAN_EVERY_S)
         if full:
             self._last_full = now
         looked = []

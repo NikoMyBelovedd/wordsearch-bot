@@ -194,3 +194,20 @@ def test_packed_dictionary_keeps_the_old_answers(tmp_path):
         ("CAR", (0, 0), (0, 2)),
         ("CART", (0, 0), (0, 3)),
     ]
+
+
+def test_without_the_board_the_full_list_is_checked_every_scan_period(
+    counted, tmp_path, monkeypatch
+):
+    frames = []
+    for i in range(6):
+        img = np.full((CALIB[1], CALIB[0], 3), (20 + 30 * i, 140, 60), np.uint8)
+        frames.append(Shot(i, native_of(img), CALIB))
+    w = make_watcher(frames, tmp_path)
+    now = [100.0]
+    monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
+    for _ in range(6):  # 0.0 .. 1.0 s: full looks at 0.0, 0.4, 0.8
+        w._tick()
+        now[0] += 0.2
+    assert not w.board_visible
+    assert counted.count("next_level") == 3
