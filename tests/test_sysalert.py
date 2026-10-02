@@ -180,6 +180,37 @@ def test_the_claim_bonus_tutorial_box_is_not_an_alert(monkeypatch):
     assert all(sysalert.find_alert(f) is not None for f in near)
 
 
+def _rounded(w: int, h: int, r: int) -> np.ndarray:
+    m = np.zeros((h, w), np.uint8)
+    cv2.rectangle(m, (r, 0), (w - 1 - r, h - 1), 1, -1)
+    cv2.rectangle(m, (0, r), (w - 1, h - 1 - r), 1, -1)
+    for cx, cy in [(r, r), (w - 1 - r, r), (r, h - 1 - r), (w - 1 - r, h - 1 - r)]:
+        cv2.circle(m, (cx, cy), r, 1, -1)
+    return m
+
+
+def test_corner_rules_allow_what_video_does_to_a_real_alert():
+    """Seen on HEVC round trips: compression filled one corner of a real button (13 px
+    of 25), a fade-in two top corners of the box. Both still count as round; a button
+    with two set corners, or a box with three, doesn't (the game's look-alikes)."""
+    k = int(sysalert.PILL_CORNER * 42)
+    pill = _rounded(282, 42, 21)
+    assert sysalert._round_corners(pill, k, 1)
+    pill[:3, :5] = 1  # one corner square 15 px full, as compression did it
+    assert pill[:k, :k].sum() == 15
+    assert sysalert._round_corners(pill, k, 1) and not sysalert._round_corners(pill, k, 0)
+    pill[-3:, -5:] = 1
+    assert not sysalert._round_corners(pill, k, 1)
+    box = _rounded(320, 150, 30)
+    assert sysalert._round_corners(box, sysalert.BOX_CORNER, 2)
+    box[:4, :6] = box[:4, -6:] = 1  # the top corners blend into the game behind
+    assert sysalert._round_corners(box, sysalert.BOX_CORNER, 2)
+    box[-4:, :6] = 1
+    assert not sysalert._round_corners(box, sysalert.BOX_CORNER, 2)
+    square = np.ones((42, 282), np.uint8)  # the toast: all four set
+    assert not sysalert._round_corners(square, k, 1)
+
+
 @pytest.mark.parametrize("name", GAME_SCREENS + REAL_ALERTS)
 def test_game_screens_have_no_banner(name):
     assert sysalert.find_banner(frame(name)) is None
