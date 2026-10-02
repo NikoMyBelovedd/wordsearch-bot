@@ -13,7 +13,48 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SERIAL = "ios"  # the iPhone over USB; --serial picks an adb device
 
 
+def _one_thread_each() -> None:
+    """A farm runs one bot per phone: OpenCV's per-call worker threads (one per core,
+    in every bot) only add switching. One each unless WSBOT_THREADS says otherwise."""
+    import cv2
+
+    cv2.setNumThreads(int(os.environ.get("WSBOT_THREADS") or 1))
+
+
+def _memory_report() -> None:
+    """local/memreport (a file) or $WSBOT_MEMREPORT: log where Python memory goes,
+    2 and 10 minutes in (tracemalloc; slows the bot a little, so only on request)."""
+    if not (os.environ.get("WSBOT_MEMREPORT") or (ROOT / "local" / "memreport").exists()):
+        return
+    import threading
+    import time
+    import tracemalloc
+
+    tracemalloc.start(3)
+
+    def report() -> None:
+        from .log import log
+
+        for wait in (120, 480):
+            time.sleep(wait)
+            snap = tracemalloc.take_snapshot()
+            total = sum(s.size for s in snap.statistics("filename"))
+            log("DIAG", f"memreport: python-tracked {total / 1e6:.0f} MB")
+            for stat in snap.statistics("traceback")[:20]:
+                where = " <- ".join(
+                    f"{f.filename.rsplit(os.sep, 1)[-1]}:{f.lineno}" for f in stat.traceback
+                )
+                log("DIAG", f"memreport: {stat.size / 1e6:6.1f} MB x{stat.count} {where}")
+
+    threading.Thread(target=report, daemon=True, name="memreport").start()
+
+
 def main() -> None:
+    from .slim import slim
+
+    slim()
+    _one_thread_each()
+    _memory_report()
     p = argparse.ArgumentParser(prog="wsbot", description="Word Search Explorer auto-solver")
     p.add_argument(
         "--serial",

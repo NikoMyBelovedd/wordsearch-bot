@@ -37,20 +37,31 @@ class Board:
         return self.cells[r * self.cols + c]
 
 
-def find_panel(img: np.ndarray) -> tuple[int, int, int, int] | None:
-    """Bounding box of the largest near-white connected region, if it's board-sized."""
+def find_panel(img: np.ndarray, scale: float = 1.0) -> tuple[int, int, int, int] | None:
+    """Bounding box of the largest near-white connected region, if it's board-sized.
+
+    `scale`: `img` is the calibration frame shrunk by this much (the watcher looks at a
+    half-size frame: ~4x less work). The box comes back in calibration pixels."""
     white = cv2.inRange(img, (WHITE_MIN,) * 3, (255,) * 3)
     # Opening erases thin white bridges (e.g. anti-aliased edges of the word-found
     # banner) that would otherwise merge the hint card and the board into one panel.
-    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, _OPEN_KERNEL)
+    kernel = _OPEN_KERNEL if scale == 1.0 else _kernel(scale)
+    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, kernel)
     n, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=4)
     if n < 2:
         return None
     i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     x, y, w, h, area = (int(v) for v in stats[i])
-    if area < MIN_PANEL_AREA:
+    if area < MIN_PANEL_AREA * scale * scale:
         return None
-    return x, y, w, h
+    if scale == 1.0:
+        return x, y, w, h
+    return round(x / scale), round(y / scale), round(w / scale), round(h / scale)
+
+
+def _kernel(scale: float) -> np.ndarray:
+    k = max(3, round(_OPEN_KERNEL.shape[0] * scale) | 1)
+    return np.ones((k, k), np.uint8)
 
 
 def _cluster(values: list[float], gap: float) -> list[float]:
@@ -81,24 +92,40 @@ def _fills(centers: list[float], extent: int) -> bool:
     return abs(before - after) <= 0.5 * pitch
 
 
-def covered_below(img: np.ndarray, panel: tuple[int, int, int, int]) -> bool:
+def covered_below(img: np.ndarray, panel: tuple[int, int, int, int], scale: float = 1.0) -> bool:
     """True if a flat light box (a toast) sits right under the panel's bottom edge.
+    `panel` is in calibration pixels; `img` is the calibration frame shrunk by `scale`.
 
     The toast is light grey, not board white, so it cuts the panel short and the rows
     above it pass as a whole board. Under a real board there's landscape, never a flat
     light strip.
     """
-    px, py, pw, ph = panel
-    y = py + ph + 6
+    px, py, pw, ph = (round(v * scale) for v in panel)
+    y = py + ph + max(2, round(6 * scale))
     if y >= img.shape[0]:
         return False
     strip = img[y, px + pw // 5 : px + pw - pw // 5].min(axis=1).astype(np.float32)
     return float(strip.mean()) >= 200 and float(strip.std()) < 8
 
 
-def read_board(img: np.ndarray) -> Board | None:
-    """Locate the board and its letter cells. Returns None if no clean grid is visible."""
-    panel = find_panel(img)
+def find_panel_near(
+    img: np.ndarray, near: tuple[int, int, int, int], pad: int = 32
+) -> tuple[int, int, int, int] | None:
+    """find_panel, looking only around `near` (the panel as a smaller frame saw it):
+    the same box for ~1/6 of the work on a phone-sized frame."""
+    x, y, w, h = near
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(img.shape[1], x + w + pad), min(img.shape[0], y + h + pad)
+    panel = find_panel(img[y0:y1, x0:x1])
+    if panel is None:
+        return None
+    return panel[0] + x0, panel[1] + y0, panel[2], panel[3]
+
+
+def read_board(img: np.ndarray, near: tuple[int, int, int, int] | None = None) -> Board | None:
+    """Locate the board and its letter cells. Returns None if no clean grid is visible.
+    `near`: roughly where the panel is (see find_panel_near)."""
+    panel = find_panel(img) if near is None else find_panel_near(img, near)
     if panel is None:
         return None
     px, py, pw, ph = panel

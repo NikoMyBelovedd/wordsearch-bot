@@ -189,6 +189,13 @@ def write_sysinfo(root: Path | None = None) -> None:
         dbg(f"sysinfo {line}")
 
 
+def snap_due(kind: str, every_s: float) -> bool:
+    """Whether snap(kind, ..., every_s) would save now: check before making the image."""
+    if _root is None:
+        return False
+    return time.monotonic() - _last_snap.get(kind, -1e9) >= every_s
+
+
 def snap(kind: str, img: np.ndarray | None, every_s: float = 20.0, note: str = "") -> None:
     """Save a JPEG of `img` as diagnostics/debug/<kind>_<n>.jpg at most every `every_s`."""
     if _root is None or img is None:

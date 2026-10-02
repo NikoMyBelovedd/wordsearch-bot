@@ -39,7 +39,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .board import Board, highlighted, read_board
+from .board import Board, highlighted
 from .debug import dbg, snap
 from .device import open_device
 from .goal import Goal, local_file, seconds_until_midnight
@@ -51,7 +51,8 @@ from .solver import DIRECTIONS, MIN_LEN, Dictionary, Hit
 from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
-MAX_DIAGNOSTICS = 150  # newest dumps kept; a 10-day run must not fill the disk
+MAX_DIAGNOSTICS = 40  # newest dumps kept (~2 MB each); a 10-day run must not fill the disk
+DUMP_EVERY_S = 300.0  # one dump of a kind this often: a stuck read saved one a second
 # Board gone this long after a pass = the level is over. 3 s, not 1.5: the bonus
 # "Claim" popup fades in over the board ~1 s before the watcher sees it, and 1.5 s
 # counted that as a level end. Free: the next board takes 5+ s to come anyway.
@@ -158,6 +159,7 @@ class Bot:
         # re-swipe them (each re-swipe of a taken word pops a toast).
         self._swiped_path = local_file(root, serial, "level_swiped.json")
         self.swiped, self._swiped_grid = self._load_swiped()
+        self._dumped: dict[str, float] = {}  # dump kind -> when (see _dump)
 
     # ---- board ---------------------------------------------------------------
 
@@ -193,12 +195,12 @@ class Bot:
             if now - last_report >= 5:
                 last_report = now
                 log("WAIT", f"no board for {now - start:.0f}s: {why}")
-            frame = self.watcher.latest(newer_than=last_time)
-            if frame is None:
+            shot = self.watcher.latest_shot(newer_than=last_time)
+            if shot is None:
                 why = "watcher produced no frame"
                 continue
             last_time = self.watcher.frame_time
-            board = read_board(frame)
+            frame, board = shot.calib, shot.board
             now = time.monotonic()
             thumb = cv2.resize(frame, (27, 48), interpolation=cv2.INTER_AREA).astype(np.int16)
             if board is not None or still is None or np.abs(thumb - still).mean() > 1.0:
@@ -505,7 +507,7 @@ class Bot:
                         for c in range(board.cols)
                         if highlighted(frame, board, r, c)
                     }
-                    for frame in list(self.watcher.board_frames)
+                    for frame in (shot.calib for shot in list(self.watcher.board_frames))
                 ),
                 key=len,
                 default=None,
@@ -716,11 +718,11 @@ class Bot:
         ):
             if self.watcher.level_done.is_set():
                 return True
-            frame = self.watcher.latest(newer_than=self.watcher.frame_time, timeout=1.0)
-            if frame is None:
+            shot = self.watcher.latest_shot(newer_than=self.watcher.frame_time, timeout=1.0)
+            if shot is None:
                 continue
             now = time.monotonic()
-            board = read_board(frame)
+            board = shot.board
             if board is None and self.watcher.covering():
                 # The "already collected" toast cuts the board short for ~1.5 s: that
                 # counted fake "level done"s, then "the previous level is still on screen".
@@ -870,12 +872,14 @@ class Bot:
         if seconds >= 60:
             log("PACE", f"{what} for {seconds / 60:.0f} min, back at {back}")
             self.watcher.idle.set()
+        self.watcher.resting.set()
         try:
             while not self.stop_event.is_set() and (left := until - time.time()) > 0:
                 self._hold()
                 self.stop_event.wait(min(1.0, left))
         finally:
             self.watcher.idle.clear()
+            self.watcher.resting.clear()
             self.resting_until = None
             if seconds >= IDLE_RELAUNCH_S:
                 self._relaunch = True
@@ -954,6 +958,11 @@ class Bot:
             log("WARN", f"couldn't save swiped words: {exc!r}")
 
     def _dump(self, why: str) -> None:
+        kind = why.partition("_r")[0]  # unreadable_r3c4 -> unreadable
+        now = time.monotonic()
+        if now - self._dumped.get(kind, -DUMP_EVERY_S) < DUMP_EVERY_S:
+            return
+        self._dumped[kind] = now
         frame = self.watcher.frame
         if frame is None:
             return

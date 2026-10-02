@@ -101,7 +101,7 @@ def test_coarse_popup_match_finds_the_same_spot_and_score():
         y, x = 400, 600 - tw
         frame[y : y + th, x : x + tw] = p.template
         full = match(frame, p)
-        fast = match(frame, p, coarse_frame(frame))
+        fast = match(frame, p, coarse_frame(frame, p.coarse_gray))
         assert full[0] > 0.99, p.name
         assert fast[1] == full[1], p.name
         assert abs(fast[0] - full[0]) < 1e-4, p.name
