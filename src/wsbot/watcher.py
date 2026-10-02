@@ -32,7 +32,7 @@ from .debug import dbg, snap, snap_due
 from .device import Device
 from .imgio import imread, imwrite
 from .log import log
-from .shot import SCALE, Shot
+from .shot import LOOKS, SCALE, Shot, look
 
 # SCALE: match on a half-res frame: ~4x faster, still plenty of detail for buttons
 REFINE_PAD = 8  # half-res px around the quarter-res spot where match() scores a popup
@@ -112,7 +112,7 @@ class Popup:
     # Shows during a level (the bonus jar): the board hidden under it isn't the level ending
     mid_level: bool = False
     coarse: np.ndarray | None = None  # quarter-res template for match()'s first look
-    coarse_gray: bool = True  # `coarse` is grayscale (else BGR; see GRAY_MIN_STD)
+    coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
     streak: int = 0
 
@@ -128,12 +128,16 @@ def load_popups(folder: Path) -> list[Popup]:
             continue
         small = cv2.resize(img, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
         quarter = cv2.resize(small, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-        # Ad buttons mark no-tap zones: never risk losing one to the faster look.
-        gray = not e.get("avoid", False) and (
-            cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).std() >= GRAY_MIN_STD
-        )
-        if gray:
-            quarter = cv2.cvtColor(quarter, cv2.COLOR_BGR2GRAY)
+        # "coarse" in popups.json: a cheaper look checked on pasted-popup tests (one
+        # channel for a template gray loses). Otherwise gray when it has the contrast;
+        # ad buttons mark no-tap zones, so they never risk a cheaper look untested.
+        how = e.get("coarse")
+        if how not in LOOKS:
+            gray_ok = not e.get("avoid", False) and (
+                cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).std() >= GRAY_MIN_STD
+            )
+            how = "gray" if gray_ok else "color"
+        quarter = look(quarter, how)
         popups.append(
             Popup(
                 name=e["name"],
@@ -152,7 +156,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 covers=tuple(e["covers"]) if "covers" in e else None,
                 mid_level=e.get("mid_level", False),
                 coarse=quarter if min(quarter.shape[:2]) >= COARSE_MIN else None,
-                coarse_gray=gray,
+                coarse_look=how,
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -165,11 +169,11 @@ def _tap_point(value) -> tuple[int, int] | str | None:
     return tuple(value)
 
 
-def coarse_frame(small_frame: np.ndarray, gray: bool = True) -> np.ndarray:
-    """The half-res frame halved again (grayscale for templates with coarse_gray), for
+def coarse_frame(small_frame: np.ndarray, how: str = "gray") -> np.ndarray:
+    """The half-res frame halved again, as the template's `coarse_look` sees it, for
     match()'s first look. The score itself is always taken in color."""
     quarter = cv2.resize(small_frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-    return cv2.cvtColor(quarter, cv2.COLOR_BGR2GRAY) if gray else quarter
+    return look(quarter, how)
 
 
 def match(
@@ -177,7 +181,7 @@ def match(
 ) -> tuple[float, tuple[int, int]]:
     """Best score and full-res center of `popup` in a half-res frame.
 
-    With `coarse` (coarse_frame of it, gray if popup.coarse_gray): find the spot at
+    With `coarse` (coarse_frame of it, as popup.coarse_look): find the spot at
     quarter res, then score it in color at half res in a small window around it. Same
     scores, ~10x less work: the full half-res search took 2.4 s a tick for 18 templates
     on a 2-core laptop (i5-6200U), so popups, toasts and level ends were seen seconds
@@ -395,7 +399,7 @@ class PopupWatcher(threading.Thread):
             if not full and not (popup.covers and not self._eye_on):
                 continue
             try:
-                coarse = shot.coarse if popup.coarse_gray else shot.coarse_color
+                coarse = shot.coarse_as(popup.coarse_look)
                 self._scores[popup.name] = match(shot.small, popup, coarse)
             except Exception as exc:
                 log("ERROR", f"match {popup.name} failed: {exc!r}")
@@ -491,7 +495,7 @@ class PopupWatcher(threading.Thread):
                 crop = img[round(y0 * sy) : round(y1 * sy), round(x0 * sx) : round(x1 * sx)]
                 size = (round((x1 - x0) * SCALE), round((y1 - y0) * SCALE))
                 small = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
-                score, (cx, cy) = match(small, popup, coarse_frame(small, popup.coarse_gray))
+                score, (cx, cy) = match(small, popup, coarse_frame(small, popup.coarse_look))
                 if score >= popup.threshold:
                     self._note_cover(popup, (x0 + cx, y0 + cy), t)
             except Exception as exc:

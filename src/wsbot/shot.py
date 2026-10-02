@@ -16,13 +16,29 @@ from .board import Board, find_panel, read_board
 
 SCALE = 0.5  # the watcher's working size (popups, panel)
 
+LOOKS = ("gray", "color", "B", "G", "R", "S", "V")
+
+
+def look(img: np.ndarray, how: str) -> np.ndarray:
+    """A BGR image as the popup matcher's first look sees it: gray, full color, or one
+    channel (B/G/R, or HSV saturation/value). One channel costs what gray costs; full
+    color 3x. Each template's look is the cheapest that still finds it reliably."""
+    if how == "gray":
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if how == "color":
+        return img
+    if how in "BGR":
+        return np.ascontiguousarray(img[:, :, "BGR".index(how)])
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    return np.ascontiguousarray(hsv[:, :, 1 if how == "S" else 2])
+
 
 class Shot:
     __slots__ = (
         "_board",
         "_calib",
-        "_coarse",
         "_coarse_color",
+        "_looks",
         "_mini",
         "_panel",
         "_small",
@@ -38,8 +54,8 @@ class Shot:
         self.calib_size = calib_size
         self._calib: np.ndarray | None = None
         self._small: np.ndarray | None = None
-        self._coarse: np.ndarray | None = None
         self._coarse_color: np.ndarray | None = None
+        self._looks: dict[str, np.ndarray] = {}
         self._mini: np.ndarray | None = None
         self._panel: tuple[int, int, int, int] | bool | None = False  # False = not looked
         self._board: Board | bool | None = False
@@ -69,9 +85,14 @@ class Shot:
     @property
     def coarse(self) -> np.ndarray:
         """`small` halved again, in grayscale: the popup matcher's first look."""
-        if self._coarse is None:
-            self._coarse = cv2.cvtColor(self.coarse_color, cv2.COLOR_BGR2GRAY)
-        return self._coarse
+        return self.coarse_as("gray")
+
+    def coarse_as(self, how: str) -> np.ndarray:
+        """`small` halved again, as `look` (see LOOKS); made once per picture."""
+        img = self._looks.get(how)
+        if img is None:
+            img = self._looks[how] = look(self.coarse_color, how)
+        return img
 
     @property
     def coarse_color(self) -> np.ndarray:

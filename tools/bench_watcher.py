@@ -86,12 +86,15 @@ def main() -> None:
                 )
                 coarse = timed("coarse", lambda s=small: (None, watcher.coarse_frame(s)))
             scores = {}
+            look_of = (
+                (lambda p, sh=s: sh.coarse_as(p.coarse_look))
+                if shot is not None
+                else (lambda p, c=coarse: c[1])
+            )
             for p in popups:
                 sc, center = timed(
                     "match",
-                    lambda p=p, s=small, c=coarse: watcher.match(
-                        s, p, c[0] if getattr(p, "coarse_gray", False) else c[1]
-                    ),
+                    lambda p=p, s=small, lo=look_of: watcher.match(s, p, lo(p)),
                 )
                 scores[p.name] = [round(sc, 4), list(center)]
             timings.setdefault("tick", []).append((time.perf_counter() - t0) * 1000)

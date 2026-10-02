@@ -51,7 +51,8 @@
     "file": "wisdom_continue.png",
     "threshold": 0.85,
     "cooldown": 2.0,
-    "allow": "below_board"
+    "allow": "below_board",
+    "coarse": "R"
   },
   {
     "name": "back_to_level",
