@@ -229,6 +229,7 @@ class PopupWatcher(threading.Thread):
         # it isn't fooled by letters flying off after a word is found.
         self.expected_panel: tuple[int, int, int, int] | None = None
         self.shot: Shot | None = None
+        self._shot_t = 0.0  # when self.shot's picture arrived (the toast eye's clock)
         # The newest frames with the board up (the level's last ones, at its end)
         self.board_frames: deque[Shot] = deque(maxlen=8)
         # Popup scores of the last new picture: name -> (score, center), and which
@@ -331,6 +332,7 @@ class PopupWatcher(threading.Thread):
         now = time.monotonic()
         fresh = not shot.same_picture(self.shot)
         if fresh:
+            self._shot_t = now
             self.board_visible = self._board_visible(shot)
             if self.board_visible:
                 # Only the phone's own frame (3 MB on an SE): the sizes made of it can
@@ -454,8 +456,10 @@ class PopupWatcher(threading.Thread):
         return True
 
     def _watch_cover(self) -> None:
-        """iPhone: frames are free, so look for the toast ~25x a second. At the watcher's
-        ~2 fps the bot learned of it up to 0.5 s late and kept swiping under it."""
+        """iPhone: look for the toast in every new frame the watcher takes (5 a second),
+        right away and only in its box. At the old watcher's ~2 fps the bot learned of
+        it up to 0.5 s late and kept swiping under it. It used to grab its own frames
+        10x a second: each one a full-frame conversion, ~20% of a bot's CPU."""
         w, h = self.device.calib
         box = (
             round(EYE_BOX[0] * w),
@@ -463,25 +467,30 @@ class PopupWatcher(threading.Thread):
             round(EYE_BOX[2] * w),
             round(EYE_BOX[3] * h),
         )
-        popup, (x0, y0, _, _) = self._eye, box
+        popup, (x0, y0, x1, y1) = self._eye, box
         last = None
         while not self.stop_event.is_set():
             if self.idle.is_set() or self.resting.is_set():  # no swipes, no toasts
                 self.stop_event.wait(0.5)
                 continue
             try:
-                small, t = self.device.peek(box, SCALE)
-                if t == last:  # no new frame: the screen hasn't changed
+                shot, t = self.shot, self._shot_t
+                if shot is None or shot is last:  # no new picture since the last look
                     self.stop_event.wait(EYE_EVERY_S)
                     continue
-                last = t
+                last = shot
+                img = shot.native
+                sx, sy = img.shape[1] / w, img.shape[0] / h
+                crop = img[round(y0 * sy) : round(y1 * sy), round(x0 * sx) : round(x1 * sx)]
+                size = (round((x1 - x0) * SCALE), round((y1 - y0) * SCALE))
+                small = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
                 score, (cx, cy) = match(small, popup, coarse_frame(small, popup.coarse_gray))
                 if score >= popup.threshold:
                     self._note_cover(popup, (x0 + cx, y0 + cy), t)
-            except Exception as exc:  # no frame yet, phone reconnecting
+            except Exception as exc:
                 dbg(f"toast eye: {exc!r}")
                 self.stop_event.wait(1.0)
-            self.stop_event.wait(EYE_EVERY_S)
+            self.stop_event.wait(EYE_EVERY_S / 2)
 
     def _note_cover(self, popup: Popup, center: tuple[int, int], now: float) -> None:
         if now - self.cover_seen > 0.5:  # gone that long: this is a new one
