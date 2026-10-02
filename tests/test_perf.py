@@ -133,17 +133,17 @@ def test_an_unchanged_picture_is_not_matched_again(counted, tmp_path):
     assert w.frame_time > 0 and w.latest(timeout=0) is not None
 
 
-def test_board_in_view_checks_the_full_list_once_a_second(counted, tmp_path, monkeypatch):
+def test_board_in_view_checks_the_full_list_every_two_seconds(counted, tmp_path, monkeypatch):
     frames = []
-    for i in range(6):
+    for i in range(11):
         img = board_frame()
-        img[700 + 1060 + 20 :, :] = (20 + 30 * i, 140, 60)  # landscape changes, board stays
+        img[700 + 1060 + 20 :, :] = (20 + 20 * i, 140, 60)  # landscape changes, board stays
         frames.append(Shot(i, native_of(img), CALIB))
     w = make_watcher(frames, tmp_path)
     w.expected_panel = frames[0].board.panel
     now = [100.0]
     monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
-    for _ in range(6):  # 5 frames a second: 0.0 .. 1.0 s
+    for _ in range(11):  # 5 frames a second: 0.0 .. 2.0 s
         w._tick()
         now[0] += 0.2
     assert w.board_visible
@@ -151,7 +151,7 @@ def test_board_in_view_checks_the_full_list_once_a_second(counted, tmp_path, mon
     # the watcher's list: full list at the first frame, only the toast until 1 s passed.
     toast = [p.name for p in w.popups if p.covers]
     assert counted.count("next_level") == 2
-    assert counted.count(toast[0]) == 6
+    assert counted.count(toast[0]) == 11
 
 
 def test_dumps_of_a_kind_are_rate_limited(tmp_path, monkeypatch):
@@ -207,11 +207,11 @@ def test_without_the_board_the_full_list_is_checked_every_scan_period(
     w = make_watcher(frames, tmp_path)
     now = [100.0]
     monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
-    for _ in range(6):  # 0.0 .. 1.0 s: full looks at 0.0, 0.4, 0.8
+    for _ in range(6):  # 0.0 .. 1.0 s: full looks at 0.0 and 0.8
         w._tick()
         now[0] += 0.2
     assert not w.board_visible
-    assert counted.count("next_level") == 3
+    assert counted.count("next_level") == 2
 
 
 def test_resting_scans_rarely(counted, tmp_path, monkeypatch):

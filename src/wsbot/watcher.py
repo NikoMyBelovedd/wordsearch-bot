@@ -61,10 +61,10 @@ def _env_float(name: str, default: float) -> float:
 # Looks a second at most. The phone streams up to 60; the bot needs a few (two
 # matching board reads, a button that stays put). WSBOT_FPS lowers it on weak PCs.
 MAX_FPS = max(1.0, _env_float("WSBOT_FPS", 5.0))
-FULL_EVERY_S = 1.0  # board fully in view: the whole popup list this often
+FULL_EVERY_S = 2.0  # board fully in view: the whole popup list this often
 # Otherwise (a popup, a level change) this often: the whole list was ~45% of a bot's
-# CPU at 5 looks a second, and a button tapped 0.2 s later costs nothing.
-SCAN_EVERY_S = 0.4
+# CPU at 5 looks a second, and a button tapped ~0.4 s later costs ~1% of a level.
+SCAN_EVERY_S = 0.8
 # While the bot rests between levels (paced play) nothing is urgent: look once a
 # second and scan the whole list every few seconds. Rests are ~half of paced play.
 REST_PERIOD_S = 1.0
