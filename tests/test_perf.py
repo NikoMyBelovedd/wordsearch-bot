@@ -320,7 +320,7 @@ def test_change_scan_finds_what_a_whole_search_finds():
     base[:600] = rng.integers(0, 255, (600, 1, 3), dtype=np.uint8)  # some texture
     scan = watcher_mod.ChangeScan()
     img = base.copy()
-    for step in range(8):
+    for step in range(10):
         if step in (2, 5):  # a popup shows (dimmed screen), then another spot
             img = (base * 0.5).astype(np.uint8)
             got = imread(ROOT / "templates" / "ios" / "popups" / "got_it.png")
@@ -328,17 +328,23 @@ def test_change_scan_finds_what_a_whole_search_finds():
             img[y : y + got.shape[0], x : x + got.shape[1]] = got
         elif step == 7:  # gone again
             img = base.copy()
+        elif step >= 8:  # a still screen
+            pass
         else:  # a found word lights up somewhere, the rest stays
             x, y = rng.integers(100, 900), rng.integers(700, 1300)  # not over the popup
             img[y : y + 90, x : x + 260] = rng.integers(60, 255, 3)
         shot = Shot(step, native_of(img), CALIB)
-        scan.begin(shot.coarse_color)
-        if step not in (0, 2, 5, 7):  # a few cells changed, not the whole screen
+        scan.begin(shot.coarse_color, shot.small)
+        if step >= 8:
+            assert not scan.changed.any()
+        elif step not in (0, 2, 5, 7):  # a few cells changed, not the whole screen
             assert scan.changed is not None and 0 < scan.changed.sum() < scan.changed.size / 10
         for p in popups:
             coarse = shot.coarse_as(p.coarse_look)
             whole = watcher_mod.match(shot.small, p, coarse)
-            patched = watcher_mod.match(shot.small, p, coarse, scan.spot(p, coarse))
+            patched = watcher_mod.match(shot.small, p, coarse, scan)
+            if step >= 8:  # the same pixels: every score is the exact one, kept
+                assert patched == whole
             if whole[0] >= p.threshold or patched[0] >= p.threshold:
                 assert patched == whole, (step, p.name)
             if p.name == "got_it":
@@ -383,3 +389,38 @@ def test_full_scans_rescore_a_popup_pasted_on_a_still_screen(tmp_path, monkeypat
     want = watcher_mod.match(still.small, w.popups[14], still.coarse)
     assert w.popups[14].name == "got_it" and w._scores["got_it"] == want
     assert want[0] >= 0.85 and w.device.taps == [want[1]]
+
+
+def test_change_scan_keeps_scores_only_for_the_same_pixels(monkeypatch):
+    popups = watcher_mod.load_popups(ROOT / "templates" / "ios")
+    img = board_frame()
+    scan = watcher_mod.ChangeScan()
+    calls = []
+    real = cv2.matchTemplate
+    monkeypatch.setattr(cv2, "matchTemplate", lambda *a: calls.append(1) or real(*a))
+
+    def full_scan(native):
+        shot = Shot(1, native, CALIB)
+        scan.begin(shot.coarse_color, shot.small)
+        calls.clear()
+        return [
+            watcher_mod.match(shot.small, p, shot.coarse_as(p.coarse_look), scan) for p in popups
+        ]
+
+    first = full_scan(native_of(img))
+    assert len(calls) == 2 * len(popups)  # whole maps + color scores
+    assert full_scan(native_of(img)) == first and not calls  # a still screen: all kept
+    noisy = native_of(img).astype(np.int16) + np.random.default_rng(1).integers(
+        -2, 3, (1334, 750, 3)
+    )
+    noisy = np.clip(noisy, 0, 255).astype(np.uint8)
+    shot = Shot(1, noisy, CALIB)
+    again = full_scan(noisy)
+    # noise: maps kept, but every color score taken again on the new pixels; where
+    # nothing matches, the best of a flat map can sit elsewhere, never a decision
+    assert len(calls) == len(popups)
+    for p, (score, center) in zip(popups, again, strict=True):
+        whole = watcher_mod.match(shot.small, p, shot.coarse_as(p.coarse_look))
+        assert (score >= p.threshold) == (whole[0] >= p.threshold)
+        if score >= p.threshold:
+            assert (score, center) == whole

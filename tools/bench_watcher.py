@@ -4,9 +4,13 @@ be checked against the old one frame by frame.
 
     uv run python tools/bench_watcher.py <frames dir> [--templates templates/ios]
         [--native 750x1334] [--out decisions.json] [--threads 1] [--repeat 3]
+        [--changes] [--still 1]
 
 Frames are calibration-space screenshots (the diagnostics/*.png the bot saves).
 --native shrinks each to the phone's real size first, the way an iPhone frame arrives.
+--changes runs the frames, in order, through the full scans' ChangeScan (each frame
+rescored only where it differs from the one before); --still N looks at each frame N
+times in a row, as at a still screen (decisions are those of the last look).
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ def main() -> None:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--changes", action="store_true")
+    ap.add_argument("--still", type=int, default=1)
     a = ap.parse_args()
     cv2.setNumThreads(a.threads)
 
@@ -60,55 +66,61 @@ def main() -> None:
         timings.setdefault(key, []).append((time.perf_counter() - t0) * 1000)
         return out
 
-    for _ in range(a.repeat):
-        for name, calib, native in frames:
-            t0 = time.perf_counter()
-            if shot is not None:  # the new pipeline: lazy sizes from the native frame
-                s = shot(1, native, calib)
-                small = timed("small", lambda s=s: s.small)
-                coarse = timed("coarse", lambda s=s: (s.coarse, s.coarse_color))
-                panel = timed("find_panel", lambda s=s: s.panel)
-                b = timed("read_board", lambda s=s: s.board)
-                vis = b is not None
-            else:
-                full = timed(
-                    "to_calib",
-                    lambda n=native, c=calib: cv2.resize(n, c, interpolation=cv2.INTER_LINEAR),
-                )
-                b = timed("read_board", lambda f=full: board.read_board(f))
-                vis = b is not None
-                panel = timed("find_panel", lambda f=full: board.find_panel(f))
-                small = timed(
-                    "small",
-                    lambda f=full: cv2.resize(
-                        f, None, fx=watcher.SCALE, fy=watcher.SCALE, interpolation=cv2.INTER_AREA
-                    ),
-                )
-                coarse = timed("coarse", lambda s=small: (None, watcher.coarse_frame(s)))
-            scores = {}
-            look_of = (
-                (lambda p, sh=s: sh.coarse_as(p.coarse_look))
-                if shot is not None
-                else (lambda p, c=coarse: c[1])
+    scan = watcher.ChangeScan() if a.changes else None
+    looks = [f for _ in range(a.repeat) for f in frames for _ in range(a.still)]
+    for name, calib, native in looks:
+        t0 = time.perf_counter()
+        if shot is not None:  # the new pipeline: lazy sizes from the native frame
+            s = shot(1, native, calib)
+            small = timed("small", lambda s=s: s.small)
+            coarse = timed("coarse", lambda s=s: (s.coarse, s.coarse_color))
+            panel = timed("find_panel", lambda s=s: s.panel)
+            b = timed("read_board", lambda s=s: s.board)
+            vis = b is not None
+        else:
+            full = timed(
+                "to_calib",
+                lambda n=native, c=calib: cv2.resize(n, c, interpolation=cv2.INTER_LINEAR),
             )
-            for p in popups:
-                sc, center = timed(
-                    "match",
-                    lambda p=p, s=small, lo=look_of: watcher.match(s, p, lo(p)),
-                )
-                scores[p.name] = [round(sc, 4), list(center)]
-            timings.setdefault("tick", []).append((time.perf_counter() - t0) * 1000)
-            decisions[name] = {
-                "visible": vis,
-                "panel": panel,
-                "board": b and [b.panel, b.rows, b.cols, [c.center for c in b.cells]],
-                "scores": scores,
-            }
+            b = timed("read_board", lambda f=full: board.read_board(f))
+            vis = b is not None
+            panel = timed("find_panel", lambda f=full: board.find_panel(f))
+            small = timed(
+                "small",
+                lambda f=full: cv2.resize(
+                    f, None, fx=watcher.SCALE, fy=watcher.SCALE, interpolation=cv2.INTER_AREA
+                ),
+            )
+            coarse = timed("coarse", lambda s=small: (None, watcher.coarse_frame(s)))
+        scores = {}
+        if scan is not None:
+            timed("change_mask", lambda s=s: scan.begin(s.coarse_color, s.small))
+        look_of = (
+            (lambda p, sh=s: sh.coarse_as(p.coarse_look))
+            if shot is not None
+            else (lambda p, c=coarse: c[1])
+        )
+        for p in popups:
+            sc, center = timed(
+                "match",
+                lambda p=p, s=small, lo=look_of: watcher.match(s, p, lo(p), scan),
+            )
+            scores[p.name] = [round(sc, 4), list(center)]
+        timings.setdefault("tick", []).append((time.perf_counter() - t0) * 1000)
+        decisions[name] = {
+            "visible": vis,
+            "panel": panel,
+            "board": b and [b.panel, b.rows, b.cols, [c.center for c in b.cells]],
+            "scores": scores,
+        }
 
-    n = len(frames)
-    print(f"{n} frames x {a.repeat}, {len(popups)} templates, {a.threads} cv2 thread(s)")
+    n = len(looks)
+    print(
+        f"{len(frames)} frames x {a.repeat} x {a.still} looks, {len(popups)} templates, "
+        f"{a.threads} cv2 thread(s){', change-driven' if scan else ''}"
+    )
     for key, vals in timings.items():
-        per_frame = sum(vals) / (n * a.repeat)
+        per_frame = sum(vals) / n
         print(
             f"  {key:14s} {per_frame:7.2f} ms/frame (median call {statistics.median(vals):.2f} ms)"
         )
