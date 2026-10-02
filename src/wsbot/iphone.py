@@ -273,6 +273,12 @@ def _uncollapse(img: np.ndarray) -> np.ndarray:
     pymobiledevice3 viewer does."""
     h, w = img.shape[:2]
     step = 8
+    # Almost every frame isn't collapsed: its last sampled column (or row) isn't padding,
+    # which alone means "not collapsed" below (it makes cw >= w, or ch >= h). Checking
+    # those first skips ~95% of the work (0.4 ms a frame).
+    for edge in (img[::step, ((w - 1) // step) * step], img[((h - 1) // step) * step, ::step]):
+        if (np.abs(edge.astype(np.int16) - 128) < 6).all(axis=1).mean() < 0.6:
+            return img
     gray = (np.abs(img[::step, ::step].astype(np.int16) - 128) < 6).all(axis=2)
     cols = np.flatnonzero(gray.mean(axis=0) < 0.6)
     rows = np.flatnonzero(gray.mean(axis=1) < 0.6)

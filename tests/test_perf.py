@@ -558,3 +558,59 @@ def test_iphone_frames_convert_to_the_same_pixels():
             assert np.array_equal(IPhone._to_bgr(phone, f), f.to_ndarray(format="bgr24"))
             kept = kept or phone._bgr
             assert phone._bgr is kept
+
+
+def _uncollapse_full(img: np.ndarray) -> np.ndarray:
+    """iphone._uncollapse before its edge shortcut."""
+    h, w = img.shape[:2]
+    step = 8
+    gray = (np.abs(img[::step, ::step].astype(np.int16) - 128) < 6).all(axis=2)
+    cols = np.flatnonzero(gray.mean(axis=0) < 0.6)
+    rows = np.flatnonzero(gray.mean(axis=1) < 0.6)
+    if not len(cols) or not len(rows):
+        return img
+    cw, ch = (cols[-1] + 1) * step, (rows[-1] + 1) * step
+    if 0.2 * w < cw < 0.92 * w and 0.2 * h < ch < 0.92 * h:
+        return cv2.resize(img[:ch, :cw], (w, h), interpolation=cv2.INTER_LINEAR)
+    return img
+
+
+def test_uncollapse_shortcut_keeps_every_answer():
+    """Collapsed frames (gray padding right and bottom, at many sizes), normal ones, and
+    ones gray at only one edge or with gray padding too thin to count: the same picture
+    back as before the shortcut."""
+    from wsbot.iphone import _uncollapse
+
+    rng = np.random.default_rng(5)
+    frames = [
+        cv2.imread(str(p)) for p in sorted((ROOT / "tests" / "data" / "screens").glob("*.jpg"))
+    ]
+    for w, h in [(750, 1334), (1206, 2622), (752, 1344)]:
+        content = cv2.resize(frames[0], (w, h))
+        for fx, fy in [
+            (0.5, 0.5),
+            (0.7, 0.85),
+            (0.9, 0.95),
+            (0.95, 0.9),
+            (1.0, 0.6),
+            (0.6, 1.0),
+            (0.15, 0.5),
+        ]:
+            img = np.full((h, w, 3), 128, np.uint8)
+            cw, ch = int(w * fx), int(h * fy)
+            img[:ch, :cw] = cv2.resize(content, (cw, ch))
+            frames.append(img)
+            noisy = np.clip(img + rng.normal(0, 3, img.shape), 0, 255).astype(np.uint8)
+            frames.append(noisy)
+        gray_right = content.copy()
+        gray_right[:, -40:] = 128
+        gray_bottom = content.copy()
+        gray_bottom[-60:] = 128
+        frames += [content, gray_right, gray_bottom, np.full((h, w, 3), 128, np.uint8)]
+    resized = 0
+    for img in frames:
+        want, got = _uncollapse_full(img), _uncollapse(img)
+        assert (got is img) == (want is img)
+        assert np.array_equal(got, want)
+        resized += want is not img
+    assert resized >= 10
