@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -259,3 +260,27 @@ def test_deferred_module_loads_on_first_use(monkeypatch):
     assert stub.Question.__name__ == "Question"  # annotation-only name, no load
     assert callable(stub.main)  # first real use loads the real module
     assert sys.modules["json.tool"] is not stub
+
+
+def test_toast_eye_finds_the_toast_in_the_watchers_frames(tmp_path):
+    from wsbot.imgio import imread
+
+    img = np.full((CALIB[1], CALIB[0], 3), (90, 140, 60), np.uint8)
+    toast = imread(ROOT / "templates" / "ios" / "popups" / "already_collected.png")
+    th, tw = toast.shape[:2]
+    x, y = 300, 1600  # inside EYE_BOX on an SE
+    img[y : y + th, x : x + tw] = toast
+    w = make_watcher([Shot(1, native_of(img), CALIB)], tmp_path)
+    w.device.peek = lambda *a: None  # an iPhone: the eye watches the toast
+    w2 = PopupWatcher(w.device, ROOT / "templates" / "ios", "pkg", tmp_path)
+    assert w2._eye_on
+    w2.shot, w2._shot_t = Shot(1, native_of(img), CALIB), time.monotonic()
+    t = threading.Thread(target=w2._watch_cover, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 3
+    while not w2.cover_seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+    w2.stop()
+    assert w2.cover_seen
+    lo, hi = w2.cover_span
+    assert lo < y + th // 2 < hi
