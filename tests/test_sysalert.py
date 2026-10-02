@@ -416,6 +416,32 @@ def test_a_banner_is_waited_out_never_tapped(clock, tmp_path):
     assert phone.launches == 0
 
 
+def test_banner_checks_wait_for_an_input_near_the_top(clock, tmp_path, monkeypatch):
+    """Mid-level the bot only swipes on the board, which no banner zone can reach: the
+    frames due a banner check are kept (a few) but not looked at. The first tap near
+    the top looks at what's due and sees the zone the old every-0.3 s check had."""
+    looked = []
+    real = sysalert.find_banner_in
+    monkeypatch.setattr(sysalert, "find_banner_in", lambda a: looked.append(1) or real(a))
+    shots = shots_of("board_readable", 2) + shots_of("se_banner_light", 10, start=10)
+    shots += [Shot(100 + i, frame("board_readable").copy(), SE_CALIB) for i in range(40)]
+    w, phone = watcher_on(shots, tmp_path)
+    w.expected_panel = Shot(0, frame("board_readable"), SE_CALIB).panel
+    for _ in range(12):  # 2 frames of the board, then 10 with the banner over it
+        run(w, clock, 0.2, step=0.2)
+        assert phone.tap(648, 1244)  # on the board: never looks
+    assert looked == [] and len(w._banner_looks) <= 5
+    assert not phone.tap(225, 135, allow="star_bonus_jar")  # the banner is up
+    assert 1 <= len(looked) <= 5
+    run(w, clock, 0.6, step=0.2)  # the banner went 0.6 s ago: its zone lingers
+    assert not phone.tap(225, 135, allow="star_bonus_jar")
+    run(w, clock, 0.4, step=0.2)  # ...for BANNER_LINGER_S
+    assert phone.tap(225, 135, allow="star_bonus_jar")
+    n = len(looked)
+    run(w, clock, 5.0, step=0.2)
+    assert len(looked) == n and len(w._banner_looks) <= 5
+
+
 def test_android_has_no_iphone_alert_checks(tmp_path):
     shots = shots_of("se_notifications_dark")
     phone = Phone(shots)

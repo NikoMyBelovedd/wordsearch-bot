@@ -118,6 +118,9 @@ ALERT_SAME = 8.0  # mean abs difference of two 48x24 looks at the box: the same 
 TRUST_LOG_EVERY_S = 600.0
 # Notification banners over the top of the screen: a no-tap zone while one is up (a tap
 # opens the app that sent it), plus this long after it was last seen (it slides away).
+# Looked for in a frame every BANNER_EVERY_S, but only when an input near the top is
+# about to be checked against the zones (see _banner_due): mid-level it was ~4% of a
+# bot's CPU for a zone that only a tap up there ever reads.
 BANNER_EVERY_S = 0.3
 BANNER_LINGER_S = 0.8
 BANNER_PAD = 16  # calibration px around the banner's box
@@ -180,6 +183,18 @@ class Popup:
     coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
     streak: int = 0
+
+
+@dataclass
+class BannerLook:
+    """A banner check that was due (see PopupWatcher._check_banner), done when needed."""
+
+    t: float  # the tick it was due at
+    strip: np.ndarray | None  # a copy of the frame's sysalert.banner_area (until looked at)
+    native: tuple[int, int]  # the frame's (height, width)
+    calib: tuple[int, int]  # its calibration size
+    same_t: float  # the last tick that still showed this picture
+    box: tuple[int, int, int, int] | bool | None = False  # find_banner_in; False = not yet
 
 
 @dataclass
@@ -488,6 +503,7 @@ class PopupWatcher(threading.Thread):
         self.cover_span = (0, 0)
         self._eye = next((p for p in self.popups if p.covers), None)
         self._eye_on = self._eye is not None and hasattr(device, "peek")
+        self._eye_last: tuple[np.ndarray, tuple[float, tuple[int, int]]] | None = None
         self.board_visible = False
         # Set by the main thread while it solves a level. Then "board visible" is just
         # "the white panel is still exactly there": cheap, and unlike a full grid read
@@ -532,9 +548,12 @@ class PopupWatcher(threading.Thread):
         self._alert_dump = -60.0
         self._banner_check = 0.0
         self._banner_shot: Shot | None = None
-        self._banner_found = False
-        self._banner_seen = 0.0
+        self._banner_lock = threading.Lock()
+        self._banner_looks: deque[BannerLook] = deque()  # due, newest last
+        self._banner_tick = 0.0  # the last tick's time
         self._banner_zone = False
+        if self._sys_ui and hasattr(device, "set_zones_due"):
+            device.set_zones_due(self._banner_due)
 
     # ---- API for the main thread -------------------------------------------
 
@@ -809,14 +828,6 @@ class PopupWatcher(threading.Thread):
         right away and only in its box. At the old watcher's ~2 fps the bot learned of
         it up to 0.5 s late and kept swiping under it. It used to grab its own frames
         10x a second: each one a full-frame conversion, ~20% of a bot's CPU."""
-        w, h = self.device.calib
-        box = (
-            round(EYE_BOX[0] * w),
-            round(EYE_BOX[1] * h),
-            round(EYE_BOX[2] * w),
-            round(EYE_BOX[3] * h),
-        )
-        popup, (x0, y0, x1, y1) = self._eye, box
         last = None
         while not self.stop_event.is_set():
             if self.idle.is_set() or self.resting.is_set():  # no swipes, no toasts
@@ -828,18 +839,34 @@ class PopupWatcher(threading.Thread):
                     self.stop_event.wait(EYE_EVERY_S)
                     continue
                 last = shot
-                img = shot.native
-                sx, sy = img.shape[1] / w, img.shape[0] / h
-                crop = img[round(y0 * sy) : round(y1 * sy), round(x0 * sx) : round(x1 * sx)]
-                size = (round((x1 - x0) * SCALE), round((y1 - y0) * SCALE))
-                small = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
-                score, (cx, cy) = match(small, popup, coarse_frame(small, popup.coarse_look))
-                if score >= popup.threshold:
-                    self._note_cover(popup, (x0 + cx, y0 + cy), t)
+                self._eye_look(shot, t)
             except Exception as exc:
                 dbg(f"toast eye: {exc!r}")
                 self.stop_event.wait(1.0)
             self.stop_event.wait(EYE_EVERY_S / 2)
+
+    def _eye_look(self, shot: Shot, t: float) -> float:
+        """The toast eye's look at one new picture: its score there. The toast's box
+        often shows exactly the pixels of the last look (the change was elsewhere: the
+        word list, the counter); then the last look's answer is this one's too."""
+        w, h = self.device.calib
+        x0, y0 = round(EYE_BOX[0] * w), round(EYE_BOX[1] * h)
+        x1, y1 = round(EYE_BOX[2] * w), round(EYE_BOX[3] * h)
+        popup = self._eye
+        img = shot.native
+        sx, sy = img.shape[1] / w, img.shape[0] / h
+        crop = img[round(y0 * sy) : round(y1 * sy), round(x0 * sx) : round(x1 * sx)]
+        last = self._eye_last
+        if last is not None and last[0].shape == crop.shape and np.array_equal(last[0], crop):
+            score, (cx, cy) = last[1]
+        else:
+            size = (round((x1 - x0) * SCALE), round((y1 - y0) * SCALE))
+            small = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
+            score, (cx, cy) = found = match(small, popup, coarse_frame(small, popup.coarse_look))
+            self._eye_last = (crop.copy(), found)
+        if score >= popup.threshold:
+            self._note_cover(popup, (x0 + cx, y0 + cy), t)
+        return score
 
     def _note_cover(self, popup: Popup, center: tuple[int, int], now: float) -> None:
         if now - self.cover_seen > 0.5:  # gone that long: this is a new one
@@ -907,34 +934,73 @@ class PopupWatcher(threading.Thread):
 
     @staticmethod
     def _to_calib(shot: Shot, *xy: int) -> tuple[int, ...]:
-        h, w = shot.native.shape[:2]
-        sx, sy = shot.calib_size[0] / w, shot.calib_size[1] / h
+        return PopupWatcher._native_to_calib(shot.native.shape[:2], shot.calib_size, *xy)
+
+    @staticmethod
+    def _native_to_calib(
+        native: tuple[int, int], calib: tuple[int, int], *xy: int
+    ) -> tuple[int, ...]:
+        h, w = native[:2]
+        sx, sy = calib[0] / w, calib[1] / h
         return tuple(round(v * (sx if i % 2 == 0 else sy)) for i, v in enumerate(xy))
 
     def _check_banner(self, shot: Shot, now: float) -> None:
         """A banner over the top of the game is waited out: swipes on the board go on,
-        taps under it are refused (a tap opens the app that sent it)."""
-        if shot is self._banner_shot:
-            if self._banner_found:
-                self._banner_seen = now  # the same picture: still there
-        elif now - self._banner_check >= BANNER_EVERY_S:
-            self._banner_check, self._banner_shot = now, shot
-            box = sysalert.find_banner(shot.native)
-            self._banner_found = box is not None
-            if box is not None:
-                x0, y0, x1, y1 = self._to_calib(shot, *box)
-                p = BANNER_PAD
-                zone = (x0 - p, y0 - p, x1 + p, y1 + p)
+        taps under it are refused (a tap opens the app that sent it).
+
+        Every tick notes which picture a banner check (every BANNER_EVERY_S) would look
+        at; the looking is put off until an input near the top asks (_banner_due) and
+        then gives the zone a tap would have seen: the zone's only reader is the tap
+        check. Checks that can no longer matter are dropped unlooked (a banner that
+        came and went with no tap up there isn't logged)."""
+        with self._banner_lock:
+            self._banner_tick = now
+            looks = self._banner_looks
+            if shot is self._banner_shot:
+                if looks and looks[-1].t == self._banner_check:
+                    looks[-1].same_t = now  # the same picture: still what it showed
+            elif now - self._banner_check >= BANNER_EVERY_S:
+                self._banner_check, self._banner_shot = now, shot
+                img = shot.native
+                strip = sysalert.banner_area(img).copy()
+                looks.append(BannerLook(now, strip, img.shape[:2], shot.calib_size, now))
+            # A banner last seen longer ago than BANNER_LINGER_S has no zone any more
+            while looks and now - looks[0].same_t > BANNER_LINGER_S:
+                looks.popleft()
+
+    def _banner_due(self, y: int | None) -> None:
+        """Before an input at height y (None: any) is checked against the no-tap zones:
+        put the banner zone where it would be after the last tick. That is the box of
+        the newest check that found a banner, if that picture was still on screen within
+        BANNER_LINGER_S of the last tick; else no zone."""
+        calib_h = getattr(self.device, "calib", (0, 1 << 30))[1]
+        if y is not None and y > calib_h * sysalert.BANNER_TOP + BANNER_PAD + 4:
+            return  # below anywhere a banner's zone can reach
+        with self._banner_lock:
+            now = self._banner_tick
+            zone = None
+            for look in reversed(self._banner_looks):
+                if now - look.same_t > BANNER_LINGER_S:
+                    break  # this and every older one: gone too long ago
+                if look.box is False:
+                    look.box = sysalert.find_banner_in(look.strip)
+                    look.strip = None
+                if look.box is not None:
+                    x0, y0, x1, y1 = self._native_to_calib(look.native, look.calib, *look.box)
+                    p = BANNER_PAD
+                    zone = (x0 - p, y0 - p, x1 + p, y1 + p)
+                    break
+            if zone is not None:
                 if not self._banner_zone:
                     log(
                         "WATCHER",
                         f"notification banner on the iPhone: no taps in {zone} until it goes",
                     )
-                self._banner_seen, self._banner_zone = now, True
+                self._banner_zone = True
                 self.device.set_dynamic_zone("ios_banner", zone)
-        if self._banner_zone and now - self._banner_seen > BANNER_LINGER_S:
-            self._banner_zone = False
-            self.device.set_dynamic_zone("ios_banner", None)
+            elif self._banner_zone:
+                self._banner_zone = False
+                self.device.set_dynamic_zone("ios_banner", None)
 
     def _check_alert(self, shot: Shot, now: float) -> bool:
         if self.board_visible:  # an alert dims the whole screen: the board can't be in view

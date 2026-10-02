@@ -278,10 +278,23 @@ def _buttons(
     return [(p.x, p.y, p.x + p.w, p.y + p.h) for p in pills]
 
 
+BANNER_TOP = 0.25  # banners are looked for (and found) only in this top share of a frame
+
+
+def banner_area(img: np.ndarray) -> np.ndarray:
+    """The part of a frame find_banner looks at (a view)."""
+    return img[: round(img.shape[0] * BANNER_TOP)]
+
+
 def find_banner(img: np.ndarray) -> tuple[int, int, int, int] | None:
     """A notification banner over the top of the screen: a flat rounded panel almost as
     wide as the screen, just inset from its sides, in the top ~quarter."""
-    top, s = _shrink(img[: round(img.shape[0] * 0.25)])
+    return find_banner_in(banner_area(img))
+
+
+def find_banner_in(strip: np.ndarray) -> tuple[int, int, int, int] | None:
+    """find_banner, given only the frame's banner_area."""
+    top, s = _shrink(strip)
     W = top.shape[1]
     labels, comps = _components(top, 400)
     for c in comps:

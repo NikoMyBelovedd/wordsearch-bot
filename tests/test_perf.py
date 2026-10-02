@@ -472,3 +472,27 @@ def test_letter_scores_are_remembered_per_glyph_until_a_letter_is_learned(tmp_pa
     # learning a letter forgets every remembered list (they're one template short)
     reader.learn("Q", glyph)
     assert reader.ranked(glyph)[0] == (pytest.approx(1.0, abs=1e-5), "Q")
+
+
+def test_toast_eye_reuses_an_unchanged_box(counted, tmp_path):
+    """A new picture whose toast box shows the same pixels: the last look's answer."""
+    from wsbot.imgio import imread
+
+    img = np.full((CALIB[1], CALIB[0], 3), (90, 140, 60), np.uint8)
+    toast = imread(ROOT / "templates" / "ios" / "popups" / "already_collected.png")
+    th, tw = toast.shape[:2]
+    img[1600 : 1600 + th, 300 : 300 + tw] = toast
+    w = make_watcher([Shot(1, native_of(img), CALIB)], tmp_path)
+    w.device.peek = lambda *a: None
+    w = PopupWatcher(w.device, ROOT / "templates" / "ios", "pkg", tmp_path)
+    counted.clear()
+    first = w._eye_look(Shot(1, native_of(img), CALIB), 10.0)
+    assert counted == ["already_collected"] and w.cover_seen == 10.0
+    top_changed = img.copy()
+    top_changed[100:300] = 255  # the word list changed, not the toast's box
+    again = w._eye_look(Shot(2, native_of(top_changed), CALIB), 10.2)
+    assert again == first and counted == ["already_collected"] and w.cover_seen == 10.2
+    moved = img.copy()
+    moved[1600 : 1600 + th, 300 : 300 + tw] = 255  # the toast went
+    assert w._eye_look(Shot(3, native_of(moved), CALIB), 10.4) < 0.85
+    assert len(counted) == 2 and w.cover_seen == 10.2
