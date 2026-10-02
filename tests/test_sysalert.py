@@ -176,7 +176,7 @@ def test_the_claim_bonus_tutorial_box_is_not_an_alert(monkeypatch):
         for sc, bottom in [(0.8, 1040), (0.85, 1055), (0.9, 1055)]
     ]
     assert all(sysalert.find_alert(f) is None for f in near)
-    monkeypatch.setattr(sysalert, "_round_corners", lambda filled, k: True)
+    monkeypatch.setattr(sysalert, "_round_corners", lambda *a: True)
     assert all(sysalert.find_alert(f) is not None for f in near)
 
 
