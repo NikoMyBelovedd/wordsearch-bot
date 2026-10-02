@@ -135,6 +135,19 @@ def test_game_screens_are_not_alerts(name):
     assert sysalert.find_alert(frame(name)) is None
 
 
+def test_the_already_collected_toast_over_the_board_is_not_an_alert():
+    """Real iPhone, 2026-10-02: the game's "You have already collected this word!" toast
+    (a gray box at the board's bottom) inside the white board panel read as a one-button
+    alert. iOS rounds an alert box's corners and makes its buttons capsules; the panel and
+    the toast have small corner radii."""
+    img = frame("toast_over_board")
+    assert sysalert.find_alert(img) is None
+    # and the toast is the game's own: its template still sees it
+    shot = Shot(1, img, SE_CALIB)
+    toast = next(p for p in watcher_mod.load_popups(ROOT / "templates" / "ios") if p.covers)
+    assert watcher_mod.match(shot.small, toast, shot.coarse_as(toast.coarse_look))[0] >= 0.85
+
+
 @pytest.mark.parametrize("name", GAME_SCREENS + REAL_ALERTS)
 def test_game_screens_have_no_banner(name):
     assert sysalert.find_banner(frame(name)) is None
@@ -298,6 +311,16 @@ def run(w: PopupWatcher, clock: Clock, seconds: float, step: float = 0.5) -> Non
 def native_to_calib(img: np.ndarray, x: float, y: float) -> tuple[float, float]:
     cw, ch = calib_of(img)
     return x * cw / img.shape[1], y * ch / img.shape[0]
+
+
+def test_the_toast_never_puts_up_an_alert_zone(clock, tmp_path, logged):
+    """Off the board (no level being solved) the toast frame is no alert: no no-tap zone,
+    no "iPhone alert" line, no OCR."""
+    w, phone = watcher_on(shots_of("toast_over_board", 6), tmp_path)
+    run(w, clock, 3.0)
+    assert w.alert is None
+    assert "ios_alert" not in phone.__dict__.get("dynamic_zones", {})
+    assert not [m for _, m in logged if m.startswith("iPhone alert")]
 
 
 @ocr

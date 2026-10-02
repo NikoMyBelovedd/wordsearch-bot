@@ -30,6 +30,13 @@ NORM_W = 375
 FLAT_STD = 4.0  # a pixel is "flat" if no color channel varies more than this around it
 FLAT_WIN = 5
 GRAY_CHROMA = 24  # iOS alert boxes and buttons are gray (max - min channel, mean)
+# iOS rounds an alert's box (~30 pt radius) and makes its buttons capsules (radius half
+# their height): squares this big at the corners of their bounding boxes are empty.
+# The game's white board panel and its "already collected" toast (a gray pill-sized box
+# over the board's bottom) have small corner radii: that pair read as an alert.
+BOX_CORNER = 6
+PILL_CORNER = 0.12  # x the button's height (a capsule's corner is empty to ~0.146)
+CORNER_SLACK = 2  # px of a corner square that may still be set (anti-aliasing)
 
 # Buttons a bot may tap, best first. All of them close the alert without saying yes
 # to anything. Compared without case, apostrophes or punctuation (see normalize).
@@ -142,6 +149,15 @@ def _filled(labels: np.ndarray, i: int, x: int, y: int, w: int, h: int) -> tuple
     return int(filled.sum()), filled
 
 
+def _round_corners(filled: np.ndarray, k: int) -> bool:
+    """The four k x k corner squares of a shape's filled mask (its bbox) are empty."""
+    k = max(2, k)
+    return all(
+        int(c.sum()) <= CORNER_SLACK
+        for c in (filled[:k, :k], filled[:k, -k:], filled[-k:, :k], filled[-k:, -k:])
+    )
+
+
 def _chroma(img: np.ndarray, mask: np.ndarray) -> float:
     c = img.max(axis=2).astype(np.int16) - img.min(axis=2)
     return float(c[mask > 0].mean()) if mask.any() else 255.0
@@ -195,7 +211,7 @@ def find_alert(img: np.ndarray) -> Alert | None:
         ):
             continue
         area, filled = _filled(labels, c.i, c.x, c.y, c.w, c.h)
-        if area < 0.88 * c.w * c.h:
+        if area < 0.88 * c.w * c.h or not _round_corners(filled, BOX_CORNER):
             continue
         mask = labels[c.y : c.y + c.h, c.x : c.x + c.w] == c.i
         if _chroma(small[c.y : c.y + c.h, c.x : c.x + c.w], mask) > GRAY_CHROMA:
@@ -232,9 +248,11 @@ def _buttons(
             continue
         if not (28 <= c.h <= 64 and c.w >= 1.4 * c.h):
             continue
-        area, _ = _filled(labels, c.i, c.x, c.y, c.w, c.h)
+        area, pill = _filled(labels, c.i, c.x, c.y, c.w, c.h)
         if area < 0.8 * c.w * c.h or area - c.area < 0.01 * c.w * c.h:
             continue  # not a filled pill, or no label inside it
+        if not _round_corners(pill, int(PILL_CORNER * c.h)):
+            continue  # square-ish ends: not an iOS button (the game's toast)
         mask = labels[c.y : c.y + c.h, c.x : c.x + c.w] == c.i
         if _chroma(small[c.y : c.y + c.h, c.x : c.x + c.w], mask) > GRAY_CHROMA:
             continue
