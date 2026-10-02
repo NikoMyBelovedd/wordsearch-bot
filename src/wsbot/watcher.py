@@ -40,6 +40,10 @@ COARSE_MIN = 10  # templates smaller than this at quarter res are searched at ha
 # Gray finds a template's spot 3x faster than color, but lost the flat, low-contrast
 # ones (close_x_grey, get_reward) on pasted-popup tests: those keep the color look.
 GRAY_MIN_STD = 32.0
+# A full scan rescores only where the quarter-res picture changed since the last one
+# (ChangeScan); video noise moves a still screen's pixels by a few levels, a change
+# that matters (a popup, a dimmed board, a moving button) by far more.
+CHANGE_LEVEL = 12
 UNKNOWN_AFTER_S = 8.0  # board hidden and nothing matched this long -> unknown overlay
 APP_CHECK_EVERY_S = 5.0
 ACTION_SETTLE_S = 1.0  # after tapping a popup, give it this long to disappear
@@ -184,8 +188,104 @@ def coarse_frame(small_frame: np.ndarray, how: str = "gray") -> np.ndarray:
     return look(quarter, how)
 
 
+class ChangeScan:
+    """The full scans' first looks, redone only where the picture changed.
+
+    A full scan searches every template over the whole quarter-res frame: ~90% of its
+    work. Between two full scans most of the screen usually stays put (a level being
+    played changes a few cells; a popup sits still), and a template's score at a spot
+    depends only on the pixels under it there. So each template keeps its whole score
+    map from the last full scan, and only the spots whose template-sized window covers
+    a changed pixel are scored again. The color score that decides a match (match())
+    is always taken fresh, on the current frame, at the best spot of that map.
+
+    "Changed" tolerates video noise: a pixel counts once any channel moved more than
+    CHANGE_LEVEL from `ref`, the picture the maps were scored against. `ref` follows a
+    pixel only when it counts as changed, so a slow fade still adds up to a change
+    instead of creeping by under the bar, and every kept score was taken on pixels
+    within CHANGE_LEVEL of `ref`. A mostly changed frame is scored whole, as before.
+    """
+
+    TILE = 8  # quarter-res px: changes are tracked per tile, spots rescored per tile
+    REDO_ALL = 0.5  # more than this share of a map to redo: score the whole frame
+
+    def __init__(self) -> None:
+        self.ref: np.ndarray | None = None
+        self.scan = 0  # full scans so far
+        self.changed: np.ndarray | None = None  # changed tiles this scan; None = all
+        self.maps: dict[str, tuple[int, np.ndarray]] = {}  # name -> (scan, score map)
+
+    def begin(self, coarse_color: np.ndarray) -> None:
+        """Start a full scan of this picture (`Shot.coarse_color`)."""
+        self.scan += 1
+        ref = self.ref
+        if ref is None or ref.shape != coarse_color.shape:
+            self.ref, self.changed = coarse_color.copy(), None
+            return
+        # (cv2 throughout: numpy's max over the channel axis alone took ~5 ms)
+        b, g, r = cv2.split(cv2.absdiff(coarse_color, ref))
+        _, moved = cv2.threshold(cv2.max(cv2.max(b, g), r), CHANGE_LEVEL, 255, cv2.THRESH_BINARY)
+        cv2.copyTo(coarse_color, moved, ref)
+        t = self.TILE
+        h, w = moved.shape
+        gh, gw = -(-h // t), -(-w // t)
+        moved = cv2.copyMakeBorder(moved, 0, gh * t - h, 0, gw * t - w, cv2.BORDER_CONSTANT)
+        # a tile's mean is above 0 if any of its pixels moved
+        tiles = cv2.resize(moved, (gw, gh), interpolation=cv2.INTER_AREA)
+        self.changed = (tiles > 0).astype(np.uint8)
+
+    def forget(self, name: str) -> None:
+        """Drop a template's map (its scan failed): it is scored whole next time."""
+        self.maps.pop(name, None)
+
+    def spot(self, popup: Popup, coarse: np.ndarray) -> tuple[int, int]:
+        """The template's best quarter-res spot in this scan's picture, as
+        cv2.minMaxLoc over a whole cv2.matchTemplate of `coarse` would find it."""
+        tmpl = popup.coarse
+        th, tw = tmpl.shape[:2]
+        kept = self.maps.get(popup.name)
+        rects = None if kept is None or kept[0] != self.scan - 1 else self._redo(th, tw)
+        if rects is None:
+            res = cv2.matchTemplate(coarse, tmpl, cv2.TM_CCOEFF_NORMED)
+        else:
+            res = kept[1]
+            for x0, y0, x1, y1 in rects:
+                res[y0:y1, x0:x1] = cv2.matchTemplate(
+                    coarse[y0 : y1 + th - 1, x0 : x1 + tw - 1], tmpl, cv2.TM_CCOEFF_NORMED
+                )
+        self.maps[popup.name] = (self.scan, res)
+        return cv2.minMaxLoc(res)[3]
+
+    def _redo(self, th: int, tw: int) -> list[tuple[int, int, int, int]] | None:
+        """Spots (x0, y0, x1, y1 boxes of the score map) whose window covers a changed
+        tile, or None to score the whole frame."""
+        changed = self.changed
+        if changed is None:
+            return None
+        if not changed.any():
+            return []
+        t = self.TILE
+        # spots in tile (i, j) see pixel tiles i .. i + (t + th - 2) // t, same for x
+        kh, kw = (t + th - 2) // t + 1, (t + tw - 2) // t + 1
+        spots = cv2.dilate(changed, np.ones((kh, kw), np.uint8), anchor=(0, 0))
+        h, w = self.ref.shape[:2]
+        rh, rw = h - th + 1, w - tw + 1  # the score map's size
+        n, _, stats, _ = cv2.connectedComponentsWithStats(spots, connectivity=8)
+        rects, area = [], 0
+        for x, y, bw, bh, _ in stats[1:n]:
+            x0, y0 = x * t, y * t
+            x1, y1 = min(rw, (x + bw) * t), min(rh, (y + bh) * t)
+            if x0 < x1 and y0 < y1:
+                rects.append((x0, y0, x1, y1))
+                area += (x1 - x0) * (y1 - y0)
+        return None if area > self.REDO_ALL * rh * rw else rects
+
+
 def match(
-    small_frame: np.ndarray, popup: Popup, coarse: np.ndarray | None = None
+    small_frame: np.ndarray,
+    popup: Popup,
+    coarse: np.ndarray | None = None,
+    spot: tuple[int, int] | None = None,
 ) -> tuple[float, tuple[int, int]]:
     """Best score and full-res center of `popup` in a half-res frame.
 
@@ -195,12 +295,16 @@ def match(
     on a 2-core laptop (i5-6200U), so popups, toasts and level ends were seen seconds
     late. (Gray only finds the spot: gray scores run ~0.05 higher and false-matched
     next_level.)
+
+    `spot`: the quarter-res spot, already found (ChangeScan.spot).
     """
     th, tw = popup.template.shape[:2]
     ox = oy = 0
     if coarse is not None and popup.coarse is not None:
-        res = cv2.matchTemplate(coarse, popup.coarse, cv2.TM_CCOEFF_NORMED)
-        _, _, _, (qx, qy) = cv2.minMaxLoc(res)
+        if spot is None:
+            res = cv2.matchTemplate(coarse, popup.coarse, cv2.TM_CCOEFF_NORMED)
+            spot = cv2.minMaxLoc(res)[3]
+        qx, qy = spot
         h, w = small_frame.shape[:2]
         ox, oy = max(0, 2 * qx - REFINE_PAD), max(0, 2 * qy - REFINE_PAD)
         x1, y1 = min(w, 2 * qx + tw + REFINE_PAD), min(h, 2 * qy + th + REFINE_PAD)
@@ -250,6 +354,7 @@ class PopupWatcher(threading.Thread):
         self._looked: list[Popup] = []
         self._last_full = 0.0
         self._full_shot: Shot | None = None  # the picture the last full look was at
+        self._changes = ChangeScan()
         self.frame_time = 0.0
         self.fps = 0.0
         self._frame_cond = threading.Condition()
@@ -402,15 +507,24 @@ class PopupWatcher(threading.Thread):
         full = self._full_due(now)
         if full:
             self._last_full, self._full_shot = now, shot
+            try:
+                self._changes.begin(shot.coarse_color)
+            except Exception as exc:  # start over: score every template whole
+                log("ERROR", f"change scan failed: {exc!r}")
+                self._changes = ChangeScan()
         looked = []
         for popup in self.popups:
             if not full and not (popup.covers and not self._eye_on):
                 continue
             try:
                 coarse = shot.coarse_as(popup.coarse_look)
-                self._scores[popup.name] = match(shot.small, popup, coarse)
+                spot = None
+                if full and popup.coarse is not None:
+                    spot = self._changes.spot(popup, coarse)
+                self._scores[popup.name] = match(shot.small, popup, coarse, spot)
             except Exception as exc:
                 log("ERROR", f"match {popup.name} failed: {exc!r}")
+                self._changes.forget(popup.name)
                 continue
             looked.append(popup)
         self._looked = looked

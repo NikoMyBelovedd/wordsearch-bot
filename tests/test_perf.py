@@ -108,9 +108,9 @@ def counted(monkeypatch):
     calls: list[str] = []
     real = watcher_mod.match
 
-    def match(small, popup, coarse=None):
+    def match(small, popup, *args):
         calls.append(popup.name)
-        return real(small, popup, coarse)
+        return real(small, popup, *args)
 
     monkeypatch.setattr(watcher_mod, "match", match)
     return calls
@@ -307,3 +307,79 @@ def test_a_popup_that_goes_still_still_gets_a_full_look(counted, tmp_path, monke
         now[0] += 0.2
         w._tick()
     assert counted.count("next_level") == 2  # and never again for the same picture
+
+
+def test_change_scan_finds_what_a_whole_search_finds():
+    """Full scans rescore only where the picture changed; the spots and scores stay
+    those of a whole-frame search, for a popup that shows, moves and goes."""
+    from wsbot.imgio import imread
+
+    rng = np.random.default_rng(3)
+    popups = watcher_mod.load_popups(ROOT / "templates" / "ios")
+    base = board_frame()
+    base[:600] = rng.integers(0, 255, (600, 1, 3), dtype=np.uint8)  # some texture
+    scan = watcher_mod.ChangeScan()
+    img = base.copy()
+    for step in range(8):
+        if step in (2, 5):  # a popup shows (dimmed screen), then another spot
+            img = (base * 0.5).astype(np.uint8)
+            got = imread(ROOT / "templates" / "ios" / "popups" / "got_it.png")
+            x, y = (400, 1500) if step == 2 else (200, 300)
+            img[y : y + got.shape[0], x : x + got.shape[1]] = got
+        elif step == 7:  # gone again
+            img = base.copy()
+        else:  # a found word lights up somewhere, the rest stays
+            x, y = rng.integers(100, 900), rng.integers(700, 1300)  # not over the popup
+            img[y : y + 90, x : x + 260] = rng.integers(60, 255, 3)
+        shot = Shot(step, native_of(img), CALIB)
+        scan.begin(shot.coarse_color)
+        if step not in (0, 2, 5, 7):  # a few cells changed, not the whole screen
+            assert scan.changed is not None and 0 < scan.changed.sum() < scan.changed.size / 10
+        for p in popups:
+            coarse = shot.coarse_as(p.coarse_look)
+            whole = watcher_mod.match(shot.small, p, coarse)
+            patched = watcher_mod.match(shot.small, p, coarse, scan.spot(p, coarse))
+            if whole[0] >= p.threshold or patched[0] >= p.threshold:
+                assert patched == whole, (step, p.name)
+            if p.name == "got_it":
+                assert (whole[0] >= p.threshold) == (step in (2, 3, 4, 5, 6))
+
+
+def test_change_scan_change_mask():
+    scan = watcher_mod.ChangeScan()
+    a = np.full((576, 324, 3), 100, np.uint8)
+    scan.begin(a)
+    assert scan.changed is None  # first picture: everything is new
+    b = a.copy()
+    b[575, 323, 2] = 100 + watcher_mod.CHANGE_LEVEL + 1  # moved: the last tile
+    b[0, 0, 0] = 100 + watcher_mod.CHANGE_LEVEL  # noise
+    b[300, 100, 1] = 50
+    scan.begin(b)
+    assert [tuple(t) for t in np.argwhere(scan.changed)] == [(37, 12), (71, 40)]
+    assert scan.ref[0, 0, 0] == 100  # noise isn't followed: a slow drift still adds up
+    assert scan.ref[300, 100, 1] == 50
+    c = b.copy()
+    c[0, 0, 0] = 100 + 2 * watcher_mod.CHANGE_LEVEL  # crept on: now it counts
+    scan.begin(c)
+    assert [tuple(t) for t in np.argwhere(scan.changed)] == [(0, 0)]
+
+
+def test_full_scans_rescore_a_popup_pasted_on_a_still_screen(tmp_path, monkeypatch):
+    from wsbot.imgio import imread
+
+    img = np.full((CALIB[1], CALIB[0], 3), (90, 140, 60), np.uint8)
+    frames = [Shot(1, native_of(img), CALIB)]
+    got = imread(ROOT / "templates" / "ios" / "popups" / "got_it.png")
+    img[1200 : 1200 + got.shape[0], 500 : 500 + got.shape[1]] = got
+    frames.append(Shot(2, native_of(img), CALIB))
+    still = frames[1]
+    w = make_watcher(frames, tmp_path)
+    now = [100.0]
+    monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
+    w._tick()
+    assert not w.device.taps
+    now[0] += 1.0
+    w._tick()
+    want = watcher_mod.match(still.small, w.popups[14], still.coarse)
+    assert w.popups[14].name == "got_it" and w._scores["got_it"] == want
+    assert want[0] >= 0.85 and w.device.taps == [want[1]]
