@@ -19,6 +19,7 @@ Serial: `ios` (the only / first iPhone) or `ios:UDID`.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -92,6 +93,25 @@ def cancel_connect() -> None:
     _stop_waiting.set()
 
 
+def _new_phone(udid: str | None):
+    """AutomationHQ's iPhone service when AutomationHQ runs the bot (AHQ_IPHONE is set):
+    it holds the phone's stream, touch and apps for every script, outside the bot.
+    Otherwise (an older AutomationHQ, the bot run by hand, WSBOT_OWN_IPHONE=1) our own
+    USB session (iphone.py)."""
+    if os.environ.get("AHQ_IPHONE") and os.environ.get("WSBOT_OWN_IPHONE") != "1":
+        try:
+            from ahq_iphone.client import Phone, available
+
+            if available():
+                log("DEVICE", "using AutomationHQ's iPhone service")
+                return Phone(udid)
+        except ImportError as exc:
+            log("DIAG", f"AutomationHQ's iPhone service client missing ({exc}); using our own")
+    from .iphone import IPhone
+
+    return IPhone(udid)
+
+
 def model_name(product_type: str) -> str:
     return IPHONE_NAMES.get(product_type, product_type or "iPhone")
 
@@ -125,11 +145,9 @@ class IOSGameDevice(BaseDevice):
     swipe_ms = 50  # ~3 frames, 6 touch samples: 17 ms registered but misfired now and then
 
     def __init__(self, udid: str | None = None, *, dry_run: bool = False) -> None:
-        from .iphone import IPhone
-
-        self.phone = IPhone(udid)
+        self.phone = _new_phone(udid)
         self.phone.cancel = _stop_waiting  # the UI's stop key also ends a wait in reopen()
-        self._open_phone()
+        self._open_phone(udid)
         self.serial = f"ios:{self.phone.udid}"
         self.dry_run = dry_run
         self.input_lock = threading.Lock()
@@ -160,21 +178,38 @@ class IOSGameDevice(BaseDevice):
             f"dry_run={dry_run}",
         )
 
-    def _open_phone(self) -> None:
+    def _open_phone(self, udid: str | None) -> None:
         """Open the USB session; while the phone has no tunnel (unplugged, or tunneld
-        still setting it up after a replug) wait for it instead of crashing."""
-        from .iphone import NoTunnel
+        still setting it up after a replug) wait for it instead of crashing. If
+        AutomationHQ's iPhone service can't serve this bot (its tools are another
+        version, or the service is gone), use our own session instead."""
+        from .iphone import IPhone, NoTunnel
 
+        waiting_for = [NoTunnel]
+        fallback: tuple[type[BaseException], ...] = ()
+        try:
+            from ahq_iphone import client as service
+
+            waiting_for.append(service.NoTunnel)
+            fallback = (service.Unsupported, service.Unreachable)
+        except ImportError:
+            pass
         _stop_waiting.clear()
         waiting = False
         while True:
             try:
                 self.phone.open()
                 return
-            except NoTunnel as exc:
+            except tuple(waiting_for) as exc:
                 if not waiting:
                     log("DEVICE", f"waiting for the iPhone: {exc}")
                     waiting = True
+            except fallback as exc:
+                log("WARN", f"AutomationHQ's iPhone service can't be used ({exc}); using our own")
+                self.phone.close()
+                self.phone = IPhone(udid)
+                self.phone.cancel = _stop_waiting
+                continue
             if _stop_waiting.wait(WAIT_RETRY_S):
                 self.phone.close()
                 raise RuntimeError("stopped while waiting for the iPhone")
