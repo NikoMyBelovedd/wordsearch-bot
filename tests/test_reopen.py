@@ -274,6 +274,7 @@ def test_the_reader_leaves_a_dead_servers_connection_and_reads_the_new_one(monke
     fresh = StreamServer([hevc_keyframe()] * 3)
     p = IPhone(UDID)
     p.width = p.height = 64
+    p._hw = False  # this checks the reconnect, not GPU decoding (CI GPUs drop tiny frames)
     p.port = zombie.port
     p._reader = threading.Thread(target=p._read_frames, daemon=True)
     p._reader.start()
