@@ -481,6 +481,12 @@ class IPhone:
         if sock is not None:
             with contextlib.suppress(OSError):
                 sock.shutdown(socket.SHUT_RDWR)
+            if sys.platform == "win32":
+                # Windows' shutdown doesn't wake a recv that's already waiting; closing
+                # the handle does. sock.close() would wait for the reader's makefile to
+                # let go, so close the handle itself (the reader then gets an OSError).
+                with contextlib.suppress(OSError):
+                    socket._socket.socket.close(sock)
 
     def _call(self, coro, timeout: float):
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
