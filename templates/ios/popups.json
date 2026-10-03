@@ -1,5 +1,32 @@
 [
   {
+    "name": "ios_dont_allow",
+    "file": "ios_dont_allow.png",
+    "threshold": 0.88,
+    "cooldown": 2.0,
+    "holdoff": 1.5,
+    "allow": "ios_alert",
+    "system": true
+  },
+  {
+    "name": "ios_home_game_icon",
+    "file": "ios_home_game_icon.png",
+    "threshold": 0.85,
+    "cooldown": 5.0,
+    "system": true,
+    "relaunch": true,
+    "off_board": true
+  },
+  {
+    "name": "ios_app_switcher",
+    "file": "ios_app_switcher.png",
+    "threshold": 0.85,
+    "cooldown": 5.0,
+    "system": true,
+    "relaunch": true,
+    "off_board": true
+  },
+  {
     "name": "get_reward",
     "file": "get_reward.png",
     "threshold": 0.85,
@@ -8,6 +35,25 @@
       110,
       40
     ]
+  },
+  {
+    "name": "get_reward_wheel",
+    "file": "get_reward_wheel.png",
+    "threshold": 0.8,
+    "avoid": true,
+    "scales": [
+      1.03,
+      1.06,
+      1.09
+    ],
+    "avoid_box": [
+      -320,
+      -280,
+      320,
+      75
+    ],
+    "off_board": true,
+    "coarse": "gray"
   },
   {
     "name": "store_sheet_close",
@@ -22,7 +68,8 @@
     "threshold": 0.85,
     "cooldown": 2.0,
     "level_done": true,
-    "allow": "below_board"
+    "allow": "below_board",
+    "group": "next_level"
   },
   {
     "name": "next_level_text",
@@ -30,7 +77,14 @@
     "threshold": 0.85,
     "cooldown": 2.0,
     "level_done": true,
-    "allow": "below_board"
+    "allow": "below_board",
+    "group": "next_level",
+    "scales": [
+      0.97,
+      1.035,
+      1.07,
+      1.1
+    ]
   },
   {
     "name": "collect",
@@ -51,7 +105,8 @@
     "file": "wisdom_continue.png",
     "threshold": 0.85,
     "cooldown": 2.0,
-    "allow": "below_board"
+    "allow": "below_board",
+    "coarse": "R"
   },
   {
     "name": "back_to_level",
@@ -122,12 +177,27 @@
     "allow": "below_board"
   },
   {
+    "name": "keep_playing",
+    "file": "keep_playing.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board",
+    "scales": [
+      1.04,
+      1.08
+    ],
+    "off_board": true
+  },
+  {
     "name": "already_collected",
     "file": "already_collected.png",
     "threshold": 0.85,
     "cooldown": 1.0,
     "blocking": false,
-    "covers": [-140, 140],
+    "covers": [
+      -140,
+      140
+    ],
     "tap": false
   },
   {
@@ -143,5 +213,39 @@
     "cooldown": 1.5,
     "confirm": 8,
     "holdoff": 8.0
+  },
+  {
+    "name": "country_gift",
+    "file": "country_gift.png",
+    "threshold": 0.82,
+    "cooldown": 3.0,
+    "off_board": true
+  },
+  {
+    "name": "country_coin",
+    "file": "country_coin.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap": false,
+    "tap_after": 5.0,
+    "off_board": true,
+    "coarse": "gray"
+  },
+  {
+    "name": "level_complete",
+    "file": "level_complete.png",
+    "threshold": 0.9,
+    "cooldown": 2.0,
+    "tap": false,
+    "level_done": true,
+    "off_board": true
+  },
+  {
+    "name": "loading",
+    "file": "loading.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap": false,
+    "off_board": true
   }
 ]

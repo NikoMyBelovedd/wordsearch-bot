@@ -12,7 +12,8 @@ is also what makes iOS accept injected HID reports:
 - Home / App Switcher: CoreDevice hardware-button events;
 - apps: DVT process control (launch / kill / pid).
 
-A browser viewer of the phone comes for free at http://127.0.0.1:<port>/.
+A browser viewer of the phone comes for free at http://127.0.0.1:<port>/ (a free port
+per bot, logged at start; WSBOT_STREAM_PORT pins one).
 
 Needs on the PC: the tunnel service (`pymobiledevice3 remote tunneld`, run as root on
 Linux/macOS or from an Administrator terminal on Windows) and the Developer Disk Image mounted
@@ -28,10 +29,12 @@ import contextlib
 import http.client
 import logging
 import os
+import socket
 import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -78,6 +81,47 @@ def _hw_device() -> str | None:
 NO_AUDIO = not os.environ.get("WSBOT_AUDIO")
 
 
+# EXPERIMENT (off by default): ask the phone for fewer frames. It streams ~58 fps
+# while the game animates; receiving, relaying (tunneld + Apple's USB service) and
+# decoding all scale with that. Its rate controller lowers the frame rate when the
+# receiver reports one-way delay / jitter (an old pymobiledevice3 bug did exactly
+# that by accident). WSBOT_STREAM_PACE="owrd=40,jitter=20" (ms) adds that much to
+# what our RCTL feedback reports; the file local/stream_pace in the repo works too.
+def _local_setting(name: str) -> str:
+    """The text of local/<name> in the repo ("" if there's none): test switches."""
+    f = Path(__file__).resolve().parents[2] / "local" / name
+    return f.read_text().strip() if f.is_file() else ""
+
+
+def _stream_pace() -> dict[str, int]:
+    raw = os.environ.get("WSBOT_STREAM_PACE")
+    if raw is None:
+        raw = _local_setting("stream_pace")
+    out: dict[str, int] = {}
+    for part in raw.replace(";", ",").split(","):
+        key, _, val = part.partition("=")
+        if key.strip() in ("owrd", "jitter") and val.strip().isdigit():
+            out[key.strip()] = int(val.strip())
+    return out
+
+
+def _paced_rctl(build, owrd_ms: int, jitter_ms: int):
+    """Wraps ScreenStreamServer._build_rctl_packet: w4 = (arrival ms << 16) | jitter
+    (24 kHz units) at bytes 24..27."""
+    import struct
+
+    def wrapped(self) -> bytes:
+        pkt = bytearray(build(self))
+        (w4,) = struct.unpack_from("!I", pkt, 24)
+        arrival = ((w4 >> 16) + owrd_ms) & 0xFFFF
+        jitter = min(0xFFFF, (w4 & 0xFFFF) + jitter_ms * 24)
+        struct.pack_into("!I", pkt, 24, (arrival << 16) | jitter)
+        return bytes(pkt)
+
+    wrapped._wsbot_paced = True  # type: ignore[attr-defined]
+    return wrapped
+
+
 STALL_RESTART_S = 60.0  # no frames this long = a real encoder stall (pymobiledevice3: 5 s)
 # After a lost packet the stream server holds every frame until the phone sends a
 # keyframe. It asks once; when the phone ignores that, the picture stays frozen while
@@ -87,15 +131,53 @@ REOPEN_RETRY_S = 5.0  # phone gone: try to reopen the session this often
 KEY_RETRY_S = 1.5  # frozen this long: ask for a keyframe again (and every KEY_RETRY_S)
 KEY_RESTART_S = 6.0  # still frozen: restart the stream session
 KEY_RESTART_COOLDOWN_S = 20.0
+WAKE_KEY_S = 4.0  # waking from quiet: wait this long for a keyframe, then restart the stream
+# Stream restarts failing (CoreDevice error 24 = the phone out of file handles: a night
+# with three bots on one phone froze the picture for 30 min while every restart failed)
+# or a picture frozen this long: reopen the whole USB session. Reopens that don't hold
+# (another freeze within ESCALATION_WINDOW_S, more than ESCALATION_REOPENS times) or
+# can't reopen within REOPEN_GIVE_UP_S: stop the bot with an error, so AutomationHQ's
+# auto-restart takes over instead of the bot looping silently.
+STREAM_RESTART_FAILS = 3
+TUNNEL_CONNECT_S = 15.0  # connecting to one tunnel listed by tunneld
+# The stream server listens once its first stream start ends (it gives that 25 s)
+LISTEN_WAIT_S = 30.0
+FROZEN_REOPEN_S = 90.0
+REOPEN_GIVE_UP_S = 180.0
+REOPEN_MIN_TRIES = 3  # ...and at least this many tries (one can take ~2 min)
+ESCALATION_REOPENS = 2
+ESCALATION_WINDOW_S = 900.0
 # Where the phone connection comes from. "userspace" = pymobiledevice3's in-process tunnel:
 # no root, no separate tunneld window, and the phone's video (UDP) lands inside this
 # process, so the macOS firewall can't drop it (it did: 0 RTP packets with tunneld on a
 # Mac). "tunneld" = the root `pymobiledevice3 remote tunneld` service (Linux default).
-TUNNEL_MODE = os.environ.get("WSBOT_TUNNEL", "auto").lower()  # auto | userspace | tunneld
+TUNNEL_MODE = (
+    os.environ.get("WSBOT_TUNNEL")
+    or _local_setting("tunnel")  # the file local/tunnel in the repo, for tests
+    or "auto"
+).lower()  # auto | userspace | tunneld
 
 
 def use_userspace_tunnel() -> bool:
     return TUNNEL_MODE == "userspace" or (TUNNEL_MODE == "auto" and sys.platform == "darwin")
+
+
+def stream_port_setting() -> int | None:
+    """WSBOT_STREAM_PORT: a fixed port for the viewer / stream server (default: a free
+    one per bot, so two bots on one computer never share one: the second bot used to
+    fail to bind 8090 and then read the FIRST bot's phone)."""
+    try:
+        port = int(os.environ.get("WSBOT_STREAM_PORT") or 0)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def free_port() -> int:
+    """A TCP port nothing listens on right now (the OS picks it)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 class _StreamLog(logging.Handler):
@@ -127,6 +209,44 @@ class NoTunnel(IPhoneError):
     """No tunnel to the phone (unplugged, not trusted yet, or tunneld down)."""
 
 
+# The CoreDevice screen stream and the USB touch it unlocks (Xcode's Device Hub) are new
+# in iOS 27. Older phones have no tunnel (iOS 15-16) or no such stream (iOS 17-26), so
+# without this check they waited forever for a tunnel or failed with "Developer Disk
+# Image mounted?".
+MIN_IOS = (27,)
+
+
+class TooOld(IPhoneError):
+    """The phone's iOS is older than this backend can work with."""
+
+
+def ios_version(text: str | None) -> tuple[int, ...]:
+    """ "26.4.1" -> (26, 4, 1); () when unknown."""
+    parts = []
+    for part in (text or "").split("."):
+        if not part.isdigit():
+            break
+        parts.append(int(part))
+    return tuple(parts)
+
+
+def too_old(version: str | None) -> bool:
+    """Below MIN_IOS. An unknown version isn't too old."""
+    have = ios_version(version)
+    return bool(have) and have < MIN_IOS
+
+
+def check_ios(udid: str, version: str | None) -> None:
+    """Raise TooOld for a phone below MIN_IOS."""
+    if too_old(version):
+        need = ".".join(map(str, MIN_IOS))
+        raise TooOld(
+            f"iPhone {udid or '?'} has iOS {version}; the bot's iPhone mode needs iOS {need} or "
+            f"newer (it uses iOS {need}'s USB screen sharing and touch). Update the iPhone in "
+            "Settings > General > Software Update, or play on an Android phone."
+        )
+
+
 def _annexb(au: bytes) -> bytes:
     """Length-prefixed NAL units (hvcC style, as /stream.bin sends them) -> Annex-B."""
     out, i = bytearray(), 0
@@ -153,6 +273,12 @@ def _uncollapse(img: np.ndarray) -> np.ndarray:
     pymobiledevice3 viewer does."""
     h, w = img.shape[:2]
     step = 8
+    # Almost every frame isn't collapsed: its last sampled column (or row) isn't padding,
+    # which alone means "not collapsed" below (it makes cw >= w, or ch >= h). Checking
+    # those first skips ~95% of the work (0.4 ms a frame).
+    for edge in (img[::step, ((w - 1) // step) * step], img[((h - 1) // step) * step, ::step]):
+        if (np.abs(edge.astype(np.int16) - 128) < 6).all(axis=1).mean() < 0.6:
+            return img
     gray = (np.abs(img[::step, ::step].astype(np.int16) - 128) < 6).all(axis=2)
     cols = np.flatnonzero(gray.mean(axis=0) < 0.6)
     rows = np.flatnonzero(gray.mean(axis=1) < 0.6)
@@ -179,21 +305,24 @@ class IPhone:
     # Swipes: contact at the start, `steps` evenly timed samples, lift. 1.8 ms swipes
     # registered 400/400 in a test page; the game gets 50 ms (see ios_device.py).
 
-    def __init__(self, udid: str | None = None, *, port: int = 8090):
+    def __init__(self, udid: str | None = None, *, port: int | None = None):
         self.udid = udid or ""
-        self.port = port
+        self._fixed_port = port or stream_port_setting()
+        self.port = self._fixed_port or 0  # chosen on open (see free_port)
+        # Gave up on the phone (see _escalate): why, and who to tell (the bot stops)
+        self.fatal: str | None = None
+        self.on_fatal = None
+        self._escalating = False
+        self._escalations: list[float] = []
         self.width, self.height = 750, 1334  # screen px; read from the phone on open
         self.product_type = ""  # "iPhone18,3" = iPhone 17 (see ios_device.IPHONE_NAMES)
-        self._loop = asyncio.new_event_loop()
-        # ScreenStreamServer.serve() installs Ctrl-C handlers; only the main thread may.
-        self._loop.add_signal_handler = lambda *a, **k: None
-        self._loop.set_exception_handler(_quiet_resets)
-        threading.Thread(target=self._loop.run_forever, name="iphone-loop", daemon=True).start()
+        self._loop = self._new_loop()
         self._srv = None
         self._serve_task: asyncio.Task | None = None
         self._key_task: asyncio.Task | None = None
         self._log_task: asyncio.Task | None = None
         self._rsd = None
+        self._tunnel: tuple[str, int] | None = None  # the phone's RSD address via tunneld
         self._held: tuple[int, int] | None = None
         self._us = None  # pymobiledevice3 UserspaceRsdTunnel while one is open
         # frames
@@ -202,6 +331,8 @@ class IPhone:
         # someone asks (latest): the phone sends up to 60 a second, the bot looks at ~5.
         self._frame = None
         self._img: np.ndarray | None = None  # self._frame as BGR, once asked for
+        # One BGR converter for every frame (see _to_bgr); used under self._cond only
+        self._bgr = None
         self._quiet = False  # nobody looks: drop the phone's frames undecoded
         self._hw: str | bool | None = None  # GPU decoder: None = not tried, False = off
         self._hw_errors = 0
@@ -226,6 +357,7 @@ class IPhone:
         self._reopen_lock = threading.Lock()
         self._opens = 0  # successful reopens, so waiting threads can tell one happened
         self._reader: threading.Thread | None = None
+        self._reader_sock: socket.socket | None = None  # its /stream.bin connection
         self._head_bytes = 0
         self._aus_logged = 0
         self._published_logged = 0
@@ -309,6 +441,53 @@ class IPhone:
 
     # ---- session ------------------------------------------------------------------
 
+    @staticmethod
+    def _new_loop() -> asyncio.AbstractEventLoop:
+        loop = asyncio.new_event_loop()
+        # ScreenStreamServer.serve() installs Ctrl-C handlers; only the main thread may.
+        loop.add_signal_handler = lambda *a, **k: None
+        loop.set_exception_handler(_quiet_resets)
+        threading.Thread(target=loop.run_forever, name="iphone-loop", daemon=True).start()
+        return loop
+
+    def _retire_loop(self) -> None:
+        """Start the next session on a new event loop, like a fresh process would. The
+        old one can hold tasks of a dead session that nothing ends: the stream server's
+        own tunneld reconnect loop, its /stream.bin handlers (its teardown cancels them
+        only when it runs to the end, and with a dead tunnel it may not), tunneld
+        bridges. Those are cancelled (bounded) and the loop stopped."""
+        old, self._loop = self._loop, self._new_loop()
+
+        async def cancel_all() -> None:
+            me = asyncio.current_task()
+            tasks = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+            for t in tasks:
+                t.cancel()
+            if tasks:
+                await asyncio.wait(tasks, timeout=5)
+
+        try:
+            asyncio.run_coroutine_threadsafe(cancel_all(), old).result(10)
+        except Exception as exc:
+            dbg(f"old iphone loop cleanup: {exc!r}")
+        old.call_soon_threadsafe(old.stop)
+
+    def _drop_reader_conn(self) -> None:
+        """Make the frame reader leave its /stream.bin connection now. It reads with no
+        timeout (a still screen sends nothing for minutes), so a connection to a server
+        that's gone but never closed its side would hold it, and no reopen would ever
+        see a frame again; it reconnects to the new server's port by itself."""
+        sock = self._reader_sock
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            if sys.platform == "win32":
+                # Windows' shutdown doesn't wake a recv that's already waiting; closing
+                # the handle does. sock.close() would wait for the reader's makefile to
+                # let go, so close the handle itself (the reader then gets an OSError).
+                with contextlib.suppress(OSError):
+                    socket._socket.socket.close(sock)
+
     def _call(self, coro, timeout: float):
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
@@ -353,8 +532,10 @@ class IPhone:
 
     def set_quiet(self, quiet: bool) -> None:
         """Quiet: stop decoding (the bot sleeps or rests long, or AutomationHQ paused
-        it); the phone keeps streaming and its frames are dropped. Waking waits up
-        to a few seconds for a fresh keyframe, so nothing acts on the old picture."""
+        it); the phone keeps streaming and its frames are dropped, and the stream is
+        never restarted for sending nothing (see _keyframe_watchdog). Waking waits up
+        to a few seconds for a fresh keyframe, so nothing acts on the old picture, and
+        restarts the stream if none comes."""
         if quiet == self._quiet:
             return
         if quiet:
@@ -362,11 +543,22 @@ class IPhone:
             return
         seq0 = self._seq
         self._quiet = False
-        deadline = time.monotonic() + 4.0
+        if not self._wait_key(seq0) and (srv := self._srv) is not None:
+            log("RECOVERY", "iPhone stream: no keyframe after the quiet spell; restarting it")
+            try:
+                self._call(asyncio.wait_for(srv._ensure_fresh_stream(force=True), 10.0), 15.0)
+            except Exception as exc:
+                log("WARN", f"iPhone stream restart failed: {exc!r}")
+            self._wait_key(seq0)
+
+    def _wait_key(self, seq0: int) -> bool:
+        """Ask for a keyframe until a frame newer than `seq0` is decoded (or WAKE_KEY_S)."""
+        deadline = time.monotonic() + WAKE_KEY_S
         while self._seq == seq0 and time.monotonic() < deadline and not self._given_up():
             self._ask_key()
             with self._cond:
-                self._cond.wait_for(lambda: self._seq > seq0, 1.0)
+                self._cond.wait_for(lambda: self._seq > seq0, min(1.0, WAKE_KEY_S))
+        return self._seq != seq0
 
     def _ask_key(self) -> None:
         srv = self._srv
@@ -382,30 +574,44 @@ class IPhone:
         self._closing.set()
         self._stop.set()
         with contextlib.suppress(Exception):
-            self._call(self._close(), 30)
+            self._call(self._close(), 60)
+        self._drop_reader_conn()
 
-    def reopen(self) -> None:
+    def reopen(self, give_up_after: float | None = None) -> None:
         """Rebuild the session. If the phone is gone (the tunnel dropped for a while),
         wait for it to come back instead of raising: a raise here killed a 16 h run.
-        One thread reopens at a time; the others wait for it and use its session."""
+        One thread reopens at a time; the others wait for it and use its session.
+        give_up_after: raise IPhoneError if it isn't back after this many seconds."""
         gen = self._opens
         with self._reopen_lock:
             if self._opens != gen and self.alive:
                 return  # another thread just reopened it
             t0 = time.monotonic()
             next_note = 0.0
+            tries = 0
             while True:
                 log("RECOVERY", "reopening the iPhone USB session")
                 with contextlib.suppress(Exception):
-                    self._call(self._close(), 30)
+                    self._call(self._close(), 60)
+                self._retire_loop()
+                self._drop_reader_conn()
+                tries += 1
                 try:
                     self.open()
                     self._opens += 1
                     return
                 except Exception as exc:  # NoTunnel, no frames, OSError from the tunnel
-                    if self._given_up():
+                    if self._given_up() or isinstance(exc, TooOld):
                         raise
                     waited = time.monotonic() - t0
+                    if (
+                        give_up_after is not None
+                        and waited >= give_up_after
+                        and tries >= REOPEN_MIN_TRIES
+                    ):
+                        raise IPhoneError(
+                            f"not back after {waited:.0f}s and {tries} tries: {exc}"
+                        ) from exc
                     if waited >= next_note:
                         log("WARN", f"iPhone not back yet ({waited:.0f}s): {exc}")
                         next_note = waited + 60
@@ -428,15 +634,22 @@ class IPhone:
     async def _open(self) -> None:
         from pymobiledevice3.remote.core_device import screen_stream
         from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
-        from pymobiledevice3.tunneld.api import get_tunneld_devices
 
         # The phone sends frames only when the screen changes, so the server's 5 s
         # "no frames = stalled" watchdog restarted the stream whenever the board sat
         # still (the bot thinking, a probe) and dropped the touches sent meanwhile.
         screen_stream._STALL_RESTART_SECS = STALL_RESTART_S
+        pace = _stream_pace()
+        build = getattr(ScreenStreamServer, "_build_rctl_packet", None) if pace else None
+        if build is not None and not getattr(build, "_wsbot_paced", False):
+            ScreenStreamServer._build_rctl_packet = _paced_rctl(  # type: ignore[method-assign]
+                build, pace.get("owrd", 0), pace.get("jitter", 0)
+            )
+            log("LOG", f"diag: stream pacing experiment on: {pace}")
 
         await self._close()
         t_open = time.monotonic()
+        await self._check_usb_versions()
         rsds = []
         if use_userspace_tunnel():
             try:
@@ -451,7 +664,7 @@ class IPhone:
                 dbg(f"userspace tunnel traceback: {traceback.format_exc()}")
         if not rsds:
             log("DIAG", "using the tunneld service")
-            rsds = await get_tunneld_devices()
+            rsds = await self._tunneld_rsds()
         for r in rsds:
             props = {}
             with contextlib.suppress(Exception):
@@ -481,7 +694,12 @@ class IPhone:
             )
             with contextlib.suppress(Exception):
                 dbg(f"rsd services for {r.udid}: {sorted(r.peer_info.get('Services', {}))}")
-        rsd = next((r for r in rsds if not self.udid or r.udid == self.udid), None)
+        matching = [r for r in rsds if not self.udid or r.udid == self.udid]
+        # Without a UDID, prefer a phone that's new enough over an older one.
+        rsd = next(
+            (r for r in matching if not too_old(getattr(r, "product_version", None))),
+            matching[0] if matching else None,
+        )
         for r in rsds:
             if r is not rsd:
                 await r.close()
@@ -492,8 +710,14 @@ class IPhone:
             )
         from pymobiledevice3.remote.core_device.device_info import DeviceInfoService
 
+        try:
+            check_ios(rsd.udid, getattr(rsd, "product_version", None))
+        except TooOld:
+            await rsd.close()
+            raise
         with contextlib.suppress(Exception):
             self.product_type = rsd.product_type or ""
+        self._note_tunnel(rsd)
 
         try:
             async with DeviceInfoService(rsd) as info:
@@ -505,6 +729,7 @@ class IPhone:
         except Exception as exc:
             log("WARN", f"display info failed ({exc!r}); assuming {self.width}x{self.height}")
             dbg(f"display info traceback: {traceback.format_exc()}")
+        self.port = self._fixed_port or free_port()
         srv = ScreenStreamServer(rsd, bind="127.0.0.1", http_port=self.port)
         if NO_AUDIO:
 
@@ -534,6 +759,7 @@ class IPhone:
             )
             await srv._ensure_hid()
             log("DIAG", f"HID handles up after {time.monotonic() - t_open:.1f}s")
+            await self._wait_listening(task)
         except BaseException as exc:
             log("ERROR", f"iPhone open failed: {exc!r}")
             dbg(f"open traceback: {traceback.format_exc()}")
@@ -558,6 +784,112 @@ class IPhone:
             f"iPhone {rsd.udid}: USB stream + touch up, viewer http://127.0.0.1:{self.port}/",
         )
 
+    async def _tunneld_rsds(self) -> list:
+        """The phone's RSD through the tunneld helper, asked for afresh on every open:
+        after the helper restarts, the phone's tunnel comes back at a new address and
+        port (fd..::1). Each listed tunnel is tried on its own, with a timeout: one stale
+        or half-made tunnel (pymobiledevice3's get_tunneld_devices lets an OSError from
+        one end the whole list, and has no connect timeout) must not hide the good one."""
+        from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
+        from pymobiledevice3.tunneld.api import get_tunneld_tunnels
+
+        try:
+            tunnels = await asyncio.wait_for(get_tunneld_tunnels(), 10)
+        except Exception as exc:
+            raise NoTunnel(
+                "the iPhone helper (`pymobiledevice3 remote tunneld`) isn't answering: is it "
+                f"running? ({exc!r})"
+            ) from exc
+        dbg(f"tunneld lists: {tunnels}")
+        rsds = []
+        for udid, entries in tunnels.items():
+            if self.udid and udid != self.udid:
+                continue
+            for entry in reversed(entries):  # the newest last
+                address = (entry["tunnel-address"], entry["tunnel-port"])
+                rsd = RemoteServiceDiscoveryService(
+                    address,
+                    name=entry.get("interface"),
+                    auxiliary_metadata=entry.get("auxiliary-metadata"),
+                )
+                try:
+                    await asyncio.wait_for(rsd.connect(), TUNNEL_CONNECT_S)
+                except Exception as exc:
+                    log("WARN", f"iPhone tunnel {address} doesn't answer ({exc!r}); skipping it")
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(rsd.close(), 5)
+                    continue
+                rsds.append(rsd)
+                break  # one per phone
+        return rsds
+
+    def _note_tunnel(self, rsd) -> None:
+        """Log where the phone's tunnel is, and when it moved (the helper restarted)."""
+        address = getattr(getattr(rsd, "service", None), "address", None)
+        if address is None:
+            return
+        address = tuple(address)
+        if self._tunnel is not None and address != self._tunnel:
+            log(
+                "RECOVERY",
+                f"the iPhone's tunnel moved from {self._tunnel} to {address} (rebuilt: the "
+                "iPhone helper restarted, or the phone reconnected); using the new one",
+            )
+        else:
+            log("DIAG", f"iPhone tunnel at {address}")
+        self._tunnel = address
+
+    async def _wait_listening(self, task: asyncio.Task) -> None:
+        """The stream server opens its HTTP port only after the phone's stream is up.
+        Make sure it is OUR server on self.port: if the port is taken its task dies,
+        and reading from the port would show another bot's phone."""
+        deadline = time.monotonic() + LISTEN_WAIT_S
+        while time.monotonic() < deadline:
+            if task.done():
+                try:
+                    task.result()
+                    why = "it exited"
+                except BaseException as exc:
+                    why = repr(exc)
+                raise IPhoneError(f"screen stream server can't listen on port {self.port}: {why}")
+            with contextlib.suppress(OSError, TimeoutError):
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", self.port), 1.0
+                )
+                writer.close()
+                await asyncio.sleep(0.2)  # a failed bind ends the task right away
+                if not task.done():
+                    return
+            await asyncio.sleep(0.1)
+        raise IPhoneError(f"screen stream server isn't listening on port {self.port}")
+
+    async def _check_usb_versions(self) -> None:
+        """Before any tunnel: is the phone (or, without a UDID, every iPhone on USB) new
+        enough? Read over plain lockdown without pairing, so it never asks for Trust. Any
+        failure here is ignored: the tunnel path reports it as before."""
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.usbmux import list_devices
+
+        versions: dict[str, str] = {}
+        with contextlib.suppress(Exception):
+            for dev in await asyncio.wait_for(list_devices(), 10):
+                if not dev.is_usb or (self.udid and dev.serial != self.udid):
+                    continue
+                with contextlib.suppress(Exception):
+                    lockdown = await asyncio.wait_for(
+                        create_using_usbmux(dev.serial, autopair=False, connection_type="USB"),
+                        10,
+                    )
+                    try:
+                        versions[dev.serial] = lockdown.all_values.get("ProductVersion") or ""
+                    finally:
+                        await lockdown.close()
+        dbg(f"iPhones on USB by iOS version: {versions}")
+        # Without a UDID the first tunnel wins, so only refuse when no phone could work.
+        if versions and all(too_old(v) for v in versions.values()):
+            udid, version = next(iter(versions.items()))
+            check_ios(udid, version)
+
     async def _userspace_rsd(self):
         from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 
@@ -574,6 +906,10 @@ class IPhone:
 
     async def _close(self) -> None:
         task, rsd = self._serve_task, self._rsd
+        # The stream server reconnects through tunneld by itself (a dropped tunnel) and
+        # then holds a newer RSD than ours: close that one too.
+        rebound = getattr(self._srv, "_rsd", None)
+        rebound = rebound if rebound is not None and rebound is not rsd else None
         for t in (self._key_task, self._log_task):
             if t is not None:
                 t.cancel()
@@ -581,15 +917,21 @@ class IPhone:
         self._srv = self._serve_task = self._rsd = None
         if task is not None:
             task.cancel()  # serve() stops the device-side streams in its finally
+            # asyncio.wait, not wait_for: on a timeout wait_for cancels serve() again,
+            # in the middle of its teardown (each step there waits out a dead tunnel),
+            # and its last step, closing the /stream.bin connections, never ran.
             with contextlib.suppress(BaseException):
-                await asyncio.wait_for(task, 20)
+                await asyncio.wait({task}, timeout=30)
         if self._us is not None:  # the tunnel owns its RSD; a reopen builds a fresh one
             tunnel, self._us = self._us, None
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(tunnel.aclose(), 15)
         elif rsd is not None:
             with contextlib.suppress(Exception):
-                await rsd.close()
+                await asyncio.wait_for(rsd.close(), 5)
+        if rebound is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(rebound.close(), 5)
 
     # ---- frozen picture ---------------------------------------------------------------
 
@@ -630,29 +972,85 @@ class IPhone:
         loop = asyncio.get_running_loop()
         episode: float | None = None
         last_ask = last_restart = 0.0
+        fails = 0  # stream restarts failed in a row (this episode)
         while True:
             await asyncio.sleep(0.25)
             now = loop.time()
+            if self._quiet:
+                # Nobody looks (a break, a long rest, paused), and a still screen sends
+                # no frames: pymobiledevice3's stall watchdog then restarted the stream
+                # every ~68 s for the whole break ("no AU progress ... restarting
+                # stream"), burning CPU and USB for nothing. Hold its clock while quiet;
+                # waking asks for a keyframe and restarts the stream if none comes.
+                srv._last_good_au_t = max(srv._last_good_au_t, now)
+                episode, fails = None, 0
+                continue
             since = self._frozen_since(srv)
             if since is None:
                 if episode is not None and now - episode > KEY_RETRY_S:
                     log("LOG", f"iPhone stream: picture was frozen {now - episode:.1f}s, recovered")
-                episode = None
+                episode, fails = None, 0
                 continue
             episode = since if episode is None else min(episode, since)
             age = now - episode
-            if age > KEY_RESTART_S and now - last_restart > KEY_RESTART_COOLDOWN_S:
+            restarted = age > KEY_RESTART_S and now - last_restart > KEY_RESTART_COOLDOWN_S
+            if restarted:
                 last_restart = now
                 log("RECOVERY", f"iPhone stream frozen {age:.0f}s (no keyframe); restarting it")
                 try:
                     await asyncio.wait_for(srv._ensure_fresh_stream(force=True), timeout=10.0)
                 except Exception as exc:
-                    log("WARN", f"iPhone stream restart failed: {exc!r}")
+                    fails += 1
+                    log("WARN", f"iPhone stream restart failed ({fails}x): {exc!r}")
+            if fails >= STREAM_RESTART_FAILS or age > FROZEN_REOPEN_S:
+                self._escalate(f"picture frozen {age:.0f}s, {fails} stream restarts failed")
+                return  # the reopened session runs its own watchdog
+            if restarted:
                 continue
             if age > KEY_RETRY_S and now - last_ask > KEY_RETRY_S:
                 last_ask = now
                 with contextlib.suppress(Exception):
                     srv._request_recovery_idr(reason="wsbot-frozen")
+
+    def _escalate(self, why: str) -> None:
+        """The stream can't heal itself: reopen the whole USB session, from a thread of
+        its own (reopen() waits on this event loop). Give up when that doesn't hold."""
+        if self._escalating or self._given_up() or self.fatal:
+            return
+        self._escalating = True
+        threading.Thread(
+            target=self._escalate_run, args=(why,), name="iphone-escalate", daemon=True
+        ).start()
+
+    def _escalate_run(self, why: str) -> None:
+        try:
+            now = time.monotonic()
+            self._escalations = [t for t in self._escalations if now - t < ESCALATION_WINDOW_S]
+            if len(self._escalations) >= ESCALATION_REOPENS:
+                self._give_up(
+                    f"the iPhone screen stream keeps freezing ({why}; reopened "
+                    f"{len(self._escalations)}x in {ESCALATION_WINDOW_S / 60:.0f} min)"
+                )
+                return
+            self._escalations.append(now)
+            log("RECOVERY", f"iPhone stream: {why}; reopening the USB connection")
+            try:
+                self.reopen(give_up_after=REOPEN_GIVE_UP_S)
+            except Exception as exc:
+                if not self._given_up():
+                    self._give_up(f"the iPhone screen stream is dead ({why}); reopen failed: {exc}")
+        finally:
+            self._escalating = False
+
+    def _give_up(self, message: str) -> None:
+        if self.fatal is not None:
+            return
+        self.fatal = message
+        handler = self.on_fatal
+        if handler is None:
+            log("ERROR", message)
+        else:
+            handler(message)
 
     # ---- frames ---------------------------------------------------------------------
 
@@ -675,6 +1073,8 @@ class IPhone:
 
         conn = http.client.HTTPConnection("127.0.0.1", self.port)  # a static screen is silent
         try:
+            conn.connect()
+            self._reader_sock = conn.sock
             conn.request("GET", "/stream.bin")
             resp = conn.getresponse()
             self.stats["http"] = resp.status
@@ -741,6 +1141,7 @@ class IPhone:
                             )
                     self._publish(frame)
         finally:
+            self._reader_sock = None
             conn.close()
 
     def _decoder(self, av):
@@ -791,7 +1192,14 @@ class IPhone:
             self._cond.notify_all()
 
     def _to_bgr(self, frame) -> np.ndarray:
-        img = frame.to_ndarray(format="bgr24")
+        # frame.to_ndarray(format="bgr24") set up a new converter for every frame, and
+        # one that splits each picture over a thread per core: ~3.5 ms of CPU a frame
+        # on 16 cores. One kept converter on this thread: ~0.4 ms, the same pixels.
+        if self._bgr is None:
+            from av.video.reformatter import VideoReformatter
+
+            self._bgr = VideoReformatter()
+        img = self._bgr.reformat(frame, format="bgr24", threads=1).to_ndarray()
         h, w = img.shape[:2]
         raw_shape = img.shape
         snap("phone_raw_decoded", img, every_s=60)
@@ -888,13 +1296,18 @@ class IPhone:
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
 
-        async with DvtProvider(self._rsd) as dvt, ProcessControl(dvt) as pc:
+        async with DvtProvider(self._live_rsd()) as dvt, ProcessControl(dvt) as pc:
             if op == "launch":
                 return await pc.launch(bundle, kill_existing=True)
             pid = await pc.process_identifier_for_bundle_identifier(bundle)
             if op == "kill" and pid:
                 await pc.kill(pid)
             return pid
+
+    def _live_rsd(self):
+        """The RSD the stream server uses now: after a tunnel drop it reconnects through
+        tunneld by itself, and ours then points at the dead tunnel."""
+        return getattr(self._srv, "_rsd", None) or self._rsd
 
     def _do(self, coro_fn, timeout: float = 30.0):
         """Run one input coroutine; reopen the session once if the phone went away."""

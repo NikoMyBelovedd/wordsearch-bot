@@ -15,6 +15,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 
 import cv2
 import numpy as np
@@ -108,7 +109,18 @@ class BaseDevice:
         else:
             dyn[name] = rect
 
+    def set_zones_due(self, due: Callable[[int | None], None] | None) -> None:
+        """A callback that brings lazily kept no-tap zones up to date before an input
+        at height y (None: any) is checked (see PopupWatcher._banner_due)."""
+        self.__dict__["_zones_due"] = due
+
+    def sync_zones(self, y: int | None = None) -> None:
+        due = self.__dict__.get("_zones_due")
+        if due is not None:
+            due(y)
+
     def _check_safe(self, x: int, y: int, what: str, allow: str | None = None) -> None:
+        self.sync_zones(y)
         zones = dict(self.zones)
         zones.update(self.__dict__.get("dynamic_zones", {}))
         if self.below_board_y is not None:

@@ -11,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SERIAL = "ios"  # the iPhone over USB; --serial picks an adb device
+EXIT_ALREADY_RUNNING = 3  # another bot already plays on this phone
+EXIT_GAVE_UP = 4  # stuck past every recovery (dead screen stream, lost the game): restart me
 
 
 def _one_thread_each() -> None:
@@ -136,14 +138,23 @@ def headless(
 
     (ROOT / "local").mkdir(exist_ok=True)
     set_sinks(stdout_sink, file_sink(ROOT / "local" / "wsbot.log"))
+    from .instance import AlreadyRunning
+
     goal = make_goal(mode, per_day, serial, fast)
     goal.session_target = levels
-    bot = Bot(serial, ROOT, goal, dry_run=dry_run)
+    try:
+        bot = Bot(serial, ROOT, goal, dry_run=dry_run)
+    except AlreadyRunning as exc:
+        print(f"{exc} ({serial}).", file=sys.stderr)
+        sys.exit(EXIT_ALREADY_RUNNING)
     signal.signal(signal.SIGINT, lambda *_: bot.stop_event.set())
     from .control import listen
 
     listen(bot.pause_event)
     bot.run()
+    if bot.fatal:
+        print(f"The bot stopped: {bot.fatal}", file=sys.stderr)
+        sys.exit(EXIT_GAVE_UP)
 
 
 def capture(serial: str, name: str, crop: str | None, level_done: bool) -> None:

@@ -31,6 +31,10 @@ MARGIN = 0.08  # ...and how far ahead of the runner-up letter it must be
 # under ACCEPT while no other letter comes close; a big lead is as good as a high score.
 LEAD_ACCEPT, LEAD_MARGIN = 0.85, 0.15
 OCR_HEIGHT = 40  # Tesseract reads single glyphs most reliably at this size
+# ranked() results kept per normalized glyph (its exact pixels): a board is read twice
+# per level start and after every pause, and ~70% of the glyphs read come back pixel
+# for pixel (the same letter in the next frame, or elsewhere on the board)
+RANK_CACHE = 1024
 
 
 def _find_tesseract() -> str | None:
@@ -88,6 +92,7 @@ class LetterReader:
         self._rows: list[np.ndarray] = []
         self._flat: list[bool] = []
         self._mat: np.ndarray | None = None
+        self._ranked: dict[bytes, list[tuple[float, str]]] = {}  # see RANK_CACHE
         for sub in ("ref", "game"):
             for p in sorted((folder / sub).glob("*.png")):
                 img = imread(p, cv2.IMREAD_GRAYSCALE)
@@ -103,6 +108,7 @@ class LetterReader:
             log("WARNING", "Tesseract not found: new glyphs can't be learned (set TESSERACT_CMD)")
 
     def _add(self, letter: str, tmpl: np.ndarray) -> None:
+        self._ranked.clear()  # every score list is one template short now
         self.templates.append((letter, tmpl))
         row, flat = _unit(tmpl)
         self._rows.append(row)
@@ -110,6 +116,10 @@ class LetterReader:
 
     def ranked(self, norm: np.ndarray) -> list[tuple[float, str]]:
         """Best score per letter, highest first (same scores as matchTemplate)."""
+        key = norm.tobytes()
+        known = self._ranked.get(key)
+        if known is not None:
+            return list(known)
         if self._rows:  # stack new rows once, then keep only the matrix (~9 MB, not 36)
             new = np.stack(self._rows)
             self._mat = new if self._mat is None else np.concatenate([self._mat, new])
@@ -122,7 +132,11 @@ class LetterReader:
         for (letter, _), s in zip(self.templates, scores.tolist(), strict=True):
             if s > best.get(letter, -1.0):
                 best[letter] = s
-        return sorted(((s, letter) for letter, s in best.items()), reverse=True)
+        out = sorted(((s, letter) for letter, s in best.items()), reverse=True)
+        if len(self._ranked) >= RANK_CACHE:
+            self._ranked.pop(next(iter(self._ranked)))
+        self._ranked[key] = out
+        return list(out)
 
     def ocr(self, glyph: np.ndarray) -> str | None:
         if TESSERACT is None:

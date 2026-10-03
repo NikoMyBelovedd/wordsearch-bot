@@ -256,7 +256,7 @@ With the phone plugged in and unlocked, and the game open:
 
 The bot's screen opens in the terminal. The next section explains it.
 
-> **iPhone bonus:** while the bot runs, open <http://127.0.0.1:8090/> in your web browser to watch the phone's screen live.
+> **iPhone bonus:** while the bot runs, open the viewer address it logs at start (`viewer http://127.0.0.1:<port>/`) in your web browser to watch the phone's screen live. Each bot picks a free port, so several phones can run on one computer; set `WSBOT_STREAM_PORT` to pin one.
 
 ---
 
@@ -325,6 +325,8 @@ When something goes wrong, the bot saves a screenshot in the **`diagnostics`** f
 | A popup the bot doesn't know blocks the game | It saves `diagnostics/unknown_popup_*.png`. See [teaching the bot a new popup](#advanced-teaching-the-bot-a-new-popup), or open an issue on GitHub with that picture. |
 | The game restarts over and over on one level | Update the bot (download it again, Step 3) and check the log for `WARNING` lines. Open an issue with the `level_stuck_*.png` picture if it keeps happening. |
 | The iPhone's screen locked and the bot stopped | Set **Auto-Lock → Never** (Step 4). |
+| `Another copy of the bot is already playing on this phone` | Only one bot can play on a phone at a time. Stop the other one (another window, or a scheduled task) first. |
+| `The bot stopped: the iPhone screen stream ...` | The phone's screen sharing broke and reopening it didn't help. AutomationHQ restarts the bot; running by hand, start it again (unplug/replug the phone if it keeps happening). |
 
 ## FAQ
 
@@ -344,7 +346,7 @@ Yes. Keep the terminal window open, and keep the computer from going to sleep.
 Not for the game. Press **P** to pause first if you need to.
 
 **Does it work on my iPhone model?**
-It needs iOS 27 or newer. It's tested on the iPhone SE (3rd generation) and the iPhone 17. Home-button iPhones (SE 2/3) use the SE layout; every Face ID iPhone uses the iPhone 17 layout, which finds the game's top bar on the live screen, so other models should work too. If yours doesn't, run it with `--debug`, then `uv run wsbot --report`, and send the `wsbot-report.zip` it makes (open an issue on GitHub), or add the support yourself and send a pull request.
+It needs iOS 27 or newer: it sees and touches the screen through iOS 27's USB screen sharing, which older iOS versions don't have. On an older iPhone it stops right away and says which iOS the phone has. It's tested on the iPhone SE (3rd generation) and the iPhone 17. Home-button iPhones (SE 2/3) use the SE layout; every Face ID iPhone uses the iPhone 17 layout, which finds the game's top bar on the live screen, so other models should work too. If yours doesn't, run it with `--debug`, then `uv run wsbot --report`, and send the `wsbot-report.zip` it makes (open an issue on GitHub), or add the support yourself and send a pull request.
 
 **Will it get my account banned?**
 It might; automating a game can break its terms of service. See the [disclaimer](#disclaimer).
@@ -397,14 +399,22 @@ Logs are also written to `local/wsbot.log`.
 
 ## Advanced: teaching the bot a new popup
 
-When the bot meets a screen it doesn't know, it saves `diagnostics/unknown_popup_*.png`, and after a few seconds it taps the screen to try to clear it. To teach it the popup for good:
+When the bot meets a screen it doesn't know, it saves `diagnostics/unknown_popup_*.png` (once per different screen), and after a few seconds it taps the screen to try to clear it, but only while it's sure it is still in the game. If the screen stays unknown it relaunches the game (45 s), then restarts the game and the phone connection (another minute), and finally stops with an error so AutomationHQ restarts it. To teach it the popup for good:
 
 ```bash
 uv run wsbot --capture my_popup                            # 1. save the full screen
 uv run wsbot --capture my_popup --crop 400,1800,280,90     # 2. cut out the button
 ```
 
-Crop from **inside** the button (x, y, width, height, in the full-screen picture's pixels) so no background ends up in the template. The template is added to `templates/popups.json` (Android) or `templates/ios/popups.json` (iPhone). There you can tune `threshold`, `confirm`, `tap_point`, `holdoff` and `blocking`.
+Crop from **inside** the button (x, y, width, height, in the full-screen picture's pixels) so no background ends up in the template. The template is added to `templates/popups.json` (Android) or `templates/ios/popups.json` (iPhone). There you can tune `threshold`, `confirm`, `tap_point`, `holdoff` and `blocking`, plus:
+
+| Key | Meaning |
+|---|---|
+| `"tap": false` | A known screen to wait on (level complete, loading): no tap, no "unknown" dump. With `tap_after: N` it taps (its `tap_point` or the match) once it has stayed N seconds. |
+| `scales` | Extra sizes to match (e.g. `[1.035, 1.07]`) for buttons that pulse. |
+| `group` | Entries of one group share their cooldown (one button, several templates): never a double tap. |
+| `avoid` + `avoid_box` | An ad / spend button: never tapped, and while it's visible no tap lands in `[left, top, right, bottom]` px around it. |
+| `system` / `relaunch` | The phone's own screens (an iOS alert, the home screen): not proof of being in the game; `relaunch` relaunches the game instead of tapping. |
 
 ---
 

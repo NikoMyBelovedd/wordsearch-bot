@@ -42,7 +42,8 @@ from .board import Board, highlighted
 from .debug import dbg, snap
 from .device import open_device
 from .goal import Goal, local_file, seconds_until_midnight
-from .imgio import imwrite
+from .imgio import MAX_DIAGNOSTICS, imwrite, prune_pngs
+from .instance import acquire as lock_phone
 from .letters import LetterReader
 from .log import log
 from .schedule import Pacer
@@ -50,7 +51,6 @@ from .solver import DIRECTIONS, MIN_LEN, Dictionary, Hit
 from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
-MAX_DIAGNOSTICS = 40  # newest dumps kept (~2 MB each); a 10-day run must not fill the disk
 DUMP_EVERY_S = 300.0  # one dump of a kind this often: a stuck read saved one a second
 # Board gone this long after a pass = the level is over. 3 s, not 1.5: the bonus
 # "Claim" popup fades in over the board ~1 s before the watcher sees it, and 1.5 s
@@ -85,6 +85,7 @@ TOAST_EATS_S = 0.1
 POPUP_EATS_S = 0.75
 LEARN_PASSES = ("exhaustive", "slow")
 LEARN_MIN_LEN = 4
+LEARN_MAX = 16  # more lines than this fit what lit up: a misread frame, learn nothing
 LEARNED_RANK = 1_000  # learned theme words go early in the fast pass
 
 
@@ -102,6 +103,10 @@ class Pacing:
     careful_gap_s: float = 0.5  # careful pass: the game took 5/5 dropped words with long pauses
     settle_s: float = 0.3  # pause after a popup clears before swiping again
     clear_tap_s: float = 2.5  # board hidden this long with no known popup -> clear tap
+    # The board vanishing mid-level is almost always the level ending: the game shows
+    # its level-complete screen 3-5 s later. Waiting this long before the first blind
+    # tap lets the watcher recognise it (a phone farm logged ~1 blind tap per level).
+    level_end_tap_s: float = 6.0
     level_end_s: float = 2.5  # how long to wait for the level to end after a pass
     no_board_restart_s: float = 150.0  # no board at all this long -> restart the app
 
@@ -122,7 +127,19 @@ class Bot:
     def __init__(self, serial: str, root: Path, goal: Goal, *, dry_run: bool = False) -> None:
         self.root = root
         self.goal = goal
-        self.device = open_device(serial, dry_run=dry_run)
+        # One bot per phone: a second one exits here, before it touches the phone.
+        self._locks = [lock_phone(root, serial)]
+        self.fatal: str | None = None  # why the bot gave up (the process exits non-zero)
+        try:
+            self.device = open_device(serial, dry_run=dry_run)
+            # "ios" -> "ios:UDID": the UDID's lock too (AutomationHQ passes the UDID)
+            if getattr(self.device, "serial", serial) != serial:
+                self._locks.append(lock_phone(root, self.device.serial))
+        except BaseException:
+            if hasattr(self, "device"):
+                self.device.close()
+            self._release_locks()
+            raise
         self.diagnostics = root / "diagnostics"
         self.diagnostics.mkdir(exist_ok=True)
         self.letters = LetterReader(root / "templates" / "letters")
@@ -132,6 +149,8 @@ class Bot:
         self.pass_fired: list[Hit] = []
         templates = root / self.device.templates
         self.watcher = PopupWatcher(self.device, templates, PACKAGE, self.diagnostics)
+        self.watcher.on_fatal = self._fatal
+        getattr(self.device, "set_fatal_handler", lambda _: None)(self._fatal)
         self.pacing = Pacing(swipe_ms=self.device.swipe_ms)
         self.pacer = Pacer(goal.schedule, goal.progress) if goal.schedule else None
         self.resting_until: float | None = None  # epoch; set while idling / on a break
@@ -175,12 +194,19 @@ class Bot:
             rows.append(row)
         return rows
 
-    def wait_for_board(self, *, different_from: list[str] | None = None, timeout: float = 20.0):
+    def wait_for_board(
+        self,
+        *,
+        different_from: list[str] | None = None,
+        timeout: float = 20.0,
+        first_tap_s: float | None = None,
+    ):
         """Block until two consecutive frames show the same readable board.
 
         While the board stays hidden and no known popup is being handled, tap to clear:
         the game's tutorial and bonus popups close on any click, so this handles them
-        without a template for each one.
+        without a template for each one. `first_tap_s`: wait at least this long before
+        the first such tap (the board just vanished mid-level: likely the level ending).
         """
         start = time.monotonic()
         deadline = start + timeout
@@ -209,7 +235,9 @@ class Bot:
                 return None, None
             if board is not None:
                 hidden_since = now
-            elif self._should_clear_tap(now, hidden_since, last_clear):
+            elif self._should_clear_tap(
+                now, hidden_since, last_clear, first_tap_s if last_clear == start else None
+            ):
                 last_clear = now
                 self._clear_tap()
             if self.watcher.busy():
@@ -250,14 +278,18 @@ class Bot:
     def _clear_tap(self) -> None:
         if getattr(self.device, "game_missing", lambda: False)():
             return  # on the home screen a blind tap opens apps; the watcher relaunches
+        if not self.watcher.blind_taps_ok():
+            return  # not sure we're in the game any more (the watcher escalates)
         if self.clear_taps % 2 == 0:
             self.device.tap(*self.board_center, why="clear popup (board center)")
         else:
             self.device.tap(*self.device.above_board, why="clear popup (above board)")
         self.clear_taps += 1
 
-    def _should_clear_tap(self, now: float, hidden_since: float, last_clear: float) -> bool:
-        wait = self.pacing.clear_tap_s
+    def _should_clear_tap(
+        self, now: float, hidden_since: float, last_clear: float, at_least: float | None = None
+    ) -> bool:
+        wait = max(self.pacing.clear_tap_s, at_least or 0.0)
         return (
             now - hidden_since >= wait
             and now - last_clear >= wait
@@ -286,7 +318,7 @@ class Bot:
             self.held_at = self.held_at or time.monotonic()
             self.status = "waiting for popup"
             t0 = time.monotonic()
-            _, new_grid = self.wait_for_board(timeout=20)
+            _, new_grid = self.wait_for_board(timeout=20, first_tap_s=self.pacing.level_end_tap_s)
             if new_grid is None:
                 # Couldn't read any board: that is not evidence of a new level (an
                 # unreadable glyph once ended a level early). Let the level-end
@@ -484,7 +516,7 @@ class Bot:
             words = self._learned_path.read_text(encoding="utf-8").split()
         except OSError:
             return
-        for w in words:
+        for w in _with_trims(words):
             if w not in self.words.rank:
                 self.words.add(w, LEARNED_RANK)
         log("WORDS", f"{len(words)} learned theme words")
@@ -519,6 +551,7 @@ class Bot:
                 return
         fresh = lit - lit_before
         g = self.grid
+        dbg(f"learn: lit before {sorted(lit_before)}, after {sorted(lit)}")  # for replays
         # In the main log: the cells a late pass lit spell the word it finally found,
         # which tells why the earlier passes missed it.
         log(
@@ -528,24 +561,30 @@ class Bot:
         )
         # A found word lights exactly its own cells, so the line must cover a whole lit
         # run: a piece of a longer find (MOAR inside a found row) has lit cells beyond an
-        # end. And it must not be a known word (either way round: PMET = TEMP) plus one
-        # cell another find lit (ELANDING = LANDING + the E of STEP's row).
+        # end. A known word (either way round: PMET = TEMP) is nothing to learn, but a
+        # known word plus a letter can be the find: MIGRATORY (MIGRATOR is known) and
+        # SIBERIA (IBERIA) were each missed again on the next board with that theme,
+        # ~30 s each time. When it's junk instead (ELANDING = LANDING + the E of STEP's
+        # row) it costs one swipe on boards that have that line.
         keep = [
             h
             for h in self.pass_fired
             if len(h.word) >= LEARN_MIN_LEN
-            and not self._known_inside(h.word)
+            and not self._known(h.word)
             and not self._known_outside(h)
             and set(path_cells(h)) <= lit
             and sum(c not in fresh for c in path_cells(h)) <= 2
             and _whole_run(h, fresh)
         ]
         # Up to 2 cells may have been lit before: theme words cross found ones
-        # (PORCUPINE's E was BULLET's). Then the line minus that end qualifies too
-        # (PORCUPIN, NETBAL inside NETBALL): keep only the longest line.
-        keep = _drop_ambiguous(keep)
+        # (PORCUPINE's E was BULLET's). Then other lines fit the same new cells (the line
+        # minus that end, or shifted onto another found letter), and which one is the
+        # word can't be told. Learn them all: a junk line costs one swipe on a board that
+        # has it, a missed word the next board's exhaustive pass (~30 s). Keeping only
+        # the longest saved WOODBLOCKE, not WOODBLOCK; skipping partly overlapping ones
+        # lost SIBERIA (CAIREBI fit too), twice in one morning.
         words = sorted({h.word for h in keep})
-        if not words or len(words) > 8:
+        if not words or len(words) > LEARN_MAX:
             return
         # Most of what lit up must be these lines: a level-end flash or a misread frame
         # lights cells everywhere, and learning from that would teach junk.
@@ -553,8 +592,9 @@ class Bot:
         if len(fresh) > 2 * len(covered):
             dbg(f"learn: skipped {words}: {len(fresh)} cells lit vs {len(covered)}")
             return
-        for w in words:
-            self.words.add(w, LEARNED_RANK)
+        for w in _with_trims(words):
+            if w not in self.words.rank:
+                self.words.add(w, LEARNED_RANK)
         try:
             self._learned_path.parent.mkdir(exist_ok=True)
             with self._learned_path.open("a", encoding="utf-8") as f:
@@ -563,9 +603,8 @@ class Bot:
             log("WARN", f"couldn't save learned words: {exc!r}")
         log("WORDS", f"learned {', '.join(words)}")
 
-    def _known_inside(self, word: str) -> bool:
-        rank = self.words.rank
-        return any(v in rank for w in (word, word[::-1]) for v in (w, w[1:], w[:-1]))
+    def _known(self, word: str) -> bool:
+        return word in self.words.rank or word[::-1] in self.words.rank
 
     def _known_outside(self, hit: Hit) -> bool:
         """The line one cell longer at either end is a known word (DRAGONFL: the Y of
@@ -850,7 +889,20 @@ class Bot:
             if self.watcher.is_alive():
                 self.watcher.join(timeout=10)
             self.device.close()
+            self._release_locks()
             self.status = "stopped"
+
+    def _fatal(self, message: str) -> None:
+        """Can't go on (the phone's screen stream is dead, stuck off the game): stop,
+        and the process exits non-zero so AutomationHQ restarts it."""
+        if self.fatal is None:
+            self.fatal = message
+            log("ERROR", f"giving up: {message}")
+        self.stop_event.set()
+
+    def _release_locks(self) -> None:
+        for lock in self._locks:
+            lock.release()
 
     def _pace(self, level_s: float) -> None:
         """Idle between levels / take a break, per the goal's schedule."""
@@ -972,9 +1024,7 @@ class Bot:
             f"dump {why}: watcher hits={dict(self.watcher.hits)} "
             f"board_visible={self.watcher.board_visible} fps={self.watcher.fps:.1f}"
         )
-        dumps = sorted(self.diagnostics.glob("*.png"), key=lambda p: p.stat().st_mtime)
-        for old in dumps[:-MAX_DIAGNOSTICS]:
-            old.unlink(missing_ok=True)
+        prune_pngs(self.diagnostics, MAX_DIAGNOSTICS)
 
 
 def same_level(a: list[str], b: list[str]) -> bool:
@@ -1029,19 +1079,6 @@ def _subwords_last(hits: list[Hit]) -> list[Hit]:
     ]
 
 
-def _drop_ambiguous(hits: list[Hit]) -> list[Hit]:
-    """Learning candidates minus lines inside a longer one (NETBAL in NETBALL). Two that
-    only partly overlap (ITIND, TINDY around 3 new cells) can't both be the find, and
-    which one is can't be told: learn neither."""
-    cells = [frozenset(path_cells(h)) for h in hits]
-    keep = [h for h, c in zip(hits, cells, strict=True) if not any(c < o for o in cells)]
-    kept = {frozenset(path_cells(h)) for h in keep}
-    if any(a != b and a & b for a in kept for b in kept):
-        dbg(f"learn: skipped {sorted(h.word for h in keep)}: overlapping lines")
-        return []
-    return keep
-
-
 def _mostly_unlit(hit: Hit, lit: set[tuple[int, int]]) -> bool:
     """At least half the hit's cells, and 2 or more, are not yet on a found word."""
     cells = path_cells(hit)
@@ -1062,6 +1099,16 @@ def _whole_run(hit: Hit, lit: set[tuple[int, int]]) -> bool:
     (r0, c0), (r1, c1) = cells[0], cells[-1]
     dr, dc = (r1 - r0) // (len(cells) - 1), (c1 - c0) // (len(cells) - 1)
     return (r0 - dr, c0 - dc) not in lit and (r1 + dr, c1 + dc) not in lit
+
+
+def _with_trims(words: list[str]) -> list[str]:
+    """Learned lines plus each one trimmed by a letter at either end. A theme word that
+    ends next to another find's first letter can't be told from the line through it:
+    BURANO ran into MURANO's M and only BURANOM qualified (its last cell was lit by the
+    same pass). Before learn-1 a word next to a found letter was saved with that letter
+    too (FKICKBOARD, WALKMANR, SSORROWFUL). The trims cost a swipe on boards that have
+    them, and only in memory: the file keeps what was learned."""
+    return words + [t for w in words for t in (w[1:], w[:-1]) if len(t) >= LEARN_MIN_LEN]
 
 
 def path_cells(hit: Hit) -> list[tuple[int, int]]:
