@@ -52,7 +52,10 @@ def _memory_report() -> None:
 
 
 def main() -> None:
+    from .protect import require
     from .slim import slim
+
+    require(ROOT)
 
     slim()
     _one_thread_each()
