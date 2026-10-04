@@ -84,6 +84,9 @@ TOAST_EATS_S = 0.1
 # the watcher's ~0.45 s tick plus the popup fading in.
 POPUP_EATS_S = 0.75
 LEARN_PASSES = ("exhaustive", "slow")
+# A faded cell in a grid read: the game greys out filler letters that are in no word
+# (level 9345 on 2026-10-03), so no word or line may cross one.
+FADED = "#"
 LEARN_MIN_LEN = 4
 LEARN_MAX = 16  # more lines than this fit what lit up: a misread frame, learn nothing
 LEARNED_RANK = 1_000  # learned theme words go early in the fast pass
@@ -186,6 +189,9 @@ class Bot:
         for r in range(board.rows):
             row = ""
             for c in range(board.cols):
+                if board.cell(r, c).faded:
+                    row += FADED  # greyed-out filler: in no word, nothing to read
+                    continue
                 letter = self.letters.read(board.cell(r, c).glyph)
                 if letter is None:
                     self._dump(f"unreadable_r{r}c{c}")
@@ -1126,7 +1132,7 @@ def all_lines(grid: list[str]) -> list[Hit]:
         for c in range(cols):
             for dr, dc in DIRECTIONS:
                 word, rr, cc = "", r, c
-                while 0 <= rr < rows and 0 <= cc < cols:
+                while 0 <= rr < rows and 0 <= cc < cols and grid[rr][cc] != FADED:
                     word += grid[rr][cc]
                     if len(word) >= MIN_LEN:
                         out.append(Hit(abs(len(word) - 5), word, (r, c), (rr, cc)))

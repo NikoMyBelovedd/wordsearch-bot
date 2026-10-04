@@ -13,6 +13,11 @@ import numpy as np
 
 WHITE_MIN = 235  # board panel pixels are near-pure white
 DARK_MAX = 90  # letter glyphs are near-black
+# Faded letters (some levels grey out the filler letters that are in no word) are a
+# flat light grey, ~205-212 on every channel: well apart from the white panel (255),
+# black glyphs and the colored found-word pills.
+FADED_MIN, FADED_MAX = 170, 228
+_RING_KERNEL = np.ones((5, 5), np.uint8)
 MIN_PANEL_AREA = 300_000  # the board is always the biggest white panel on screen
 _OPEN_KERNEL = np.ones((9, 9), np.uint8)
 
@@ -23,6 +28,7 @@ class Cell:
     col: int
     center: tuple[int, int]  # screen coords (calibration space)
     glyph: np.ndarray  # binary crop of the letter, white-on-black
+    faded: bool = False  # a greyed-out filler letter: in no word, nothing to read
 
 
 @dataclass
@@ -166,11 +172,37 @@ def read_board(img: np.ndarray, near: tuple[int, int, int, int] | None = None) -
     roi = img[py : py + ph, px : px + pw]
     dark = cv2.inRange(roi, (0, 0, 0), (DARK_MAX,) * 3)
 
-    blobs = []
-    for x, y, w, h, area in _blobs(dark):
-        if area < 150 or x == 0 or y == 0 or x + w >= pw or y + h >= ph:
-            continue  # specks and the panel's rounded corners
-        blobs.append((int(x), int(y), int(w), int(h)))
+    def letters(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
+        out = []
+        for x, y, w, h, area in _blobs(mask):
+            if area < 150 or x == 0 or y == 0 or x + w >= pw or y + h >= ph:
+                continue  # specks and the panel's rounded corners
+            out.append((int(x), int(y), int(w), int(h)))
+        return out
+
+    blobs = letters(dark)
+    board = _grid(img, panel, blobs, dark, None, set())
+    if board is not None or not blobs:
+        return board
+    # Not a full grid of black letters: maybe some are faded. Only looked for now,
+    # so a normal board costs what it always did.
+    grey = _faded_mask(roi, dark)
+    faded = letters(grey)
+    if not faded:
+        return None
+    return _grid(img, panel, blobs + faded, dark, grey, set(faded))
+
+
+def _grid(
+    img: np.ndarray,
+    panel: tuple[int, int, int, int],
+    blobs: list[tuple[int, int, int, int]],
+    dark: np.ndarray,
+    grey: np.ndarray | None,
+    faded: set[tuple[int, int, int, int]],
+) -> Board | None:
+    """The board these letter boxes make, if they make a clean grid."""
+    px, py, pw, ph = panel
     if len(blobs) < 9:
         return None
 
@@ -200,8 +232,21 @@ def read_board(img: np.ndarray, near: tuple[int, int, int, int] | None = None) -
         for c in range(cols):
             x, y, w, h = grid[(r, c)]
             center = (px + round(col_xs[c]), py + round(row_ys[r]))
-            board.cells.append(Cell(r, c, center, dark[y : y + h, x : x + w].copy()))
+            if grey is not None and (x, y, w, h) in faded:
+                glyph = grey[y : y + h, x : x + w].copy()
+                board.cells.append(Cell(r, c, center, glyph, faded=True))
+            else:
+                board.cells.append(Cell(r, c, center, dark[y : y + h, x : x + w].copy()))
     return board
+
+
+def _faded_mask(roi: np.ndarray, dark: np.ndarray) -> np.ndarray:
+    """Light-grey pixels (faded letters), minus the grey anti-aliased rim around
+    every black glyph (which would otherwise read as a second glyph in its cell).
+    Colored pills fall outside the box on at least one channel."""
+    grey = cv2.inRange(roi, (FADED_MIN,) * 3, (FADED_MAX,) * 3)
+    grey[cv2.dilate(dark, _RING_KERNEL, iterations=2) > 0] = 0
+    return grey
 
 
 def highlighted(img: np.ndarray, board: Board, r: int, c: int) -> bool:
