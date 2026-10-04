@@ -370,3 +370,33 @@ def test_full_screen_entries_are_skipped_while_the_board_is_in_view(clock, tmp_p
     clock.t += 10
     w._score(shot, clock.t)
     assert len(w._looked) == len(w.popups)
+
+
+def test_reward_wheel_zone_goes_when_the_next_board_shows(clock, tmp_path):
+    """The level-complete screen's reward wheel is a no-tap zone. On the next board it
+    stayed up (the wheel isn't scanned while a board is in view), so swipes on the
+    board's bottom rows were refused until the level counted as stuck."""
+    board = shot_of("board_readable", 50)
+    shots = [shot_of("next_level_get_reward_twister", i) for i in range(1, 6)]
+    shots += [shot_of("board_readable", 51 + i) for i in range(20)]
+    w, phone = watcher_on(shots, tmp_path)
+    run(w, clock, 4)
+    assert phone.zones.get("get_reward_wheel") is not None
+    run(w, clock, 2)  # the last wheel frame, then the board; the bot hasn't read it yet
+    assert w.board_visible
+    w.expected_panel = board.panel  # now it has: the level started
+    w._zones_due(1600)  # the first swipe, before the next tick
+    assert phone.zones.get("get_reward_wheel") is None
+    run(w, clock, 6)
+    assert phone.zones.get("get_reward_wheel") is None
+
+
+def test_reward_wheel_zone_stays_while_the_wheel_is_up(clock, tmp_path):
+    """Swipes still in flight when the level ends must not land on the ad wheel."""
+    w, phone = watcher_on(
+        [shot_of("next_level_get_reward_twister", i) for i in range(1, 20)], tmp_path
+    )
+    w.expected_panel = shot_of("board_readable").panel  # the bot is mid-level
+    run(w, clock, 4)
+    w._zones_due(1600)
+    assert phone.zones.get("get_reward_wheel") is not None

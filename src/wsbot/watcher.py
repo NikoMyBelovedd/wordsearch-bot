@@ -564,8 +564,8 @@ class PopupWatcher(threading.Thread):
         self._banner_looks: deque[BannerLook] = deque()  # due, newest last
         self._banner_tick = 0.0  # the last tick's time
         self._banner_zone = False
-        if self._sys_ui and hasattr(device, "set_zones_due"):
-            device.set_zones_due(self._banner_due)
+        if hasattr(device, "set_zones_due"):
+            device.set_zones_due(self._zones_due)
 
     # ---- API for the main thread -------------------------------------------
 
@@ -765,7 +765,18 @@ class PopupWatcher(threading.Thread):
         system_only: only the phone's own screens (an iPhone alert is up)."""
         hit = None
         scores = []
+        # A popup that only shows off the board can't be over a board in view. Its
+        # score may be from the picture before the board came back, and once the board
+        # is up it isn't scanned any more, so its no-tap zone would stay forever: the
+        # level-complete screen's reward wheel kept refusing swipes on the next board
+        # until the level counted as stuck and the game was restarted.
+        on_board = self.board_visible and self.expected_panel is not None
+        if on_board:
+            self._drop_off_board_zones()
         for popup in self._looked:
+            if on_board and popup.off_board:
+                popup.streak, popup.seen_since = 0, 0.0
+                continue
             if system_only and not (popup.system or popup.avoid):
                 popup.streak, popup.seen_since = 0, 0.0
                 continue
@@ -1009,6 +1020,20 @@ class PopupWatcher(threading.Thread):
             # A banner last seen longer ago than BANNER_LINGER_S has no zone any more
             while looks and now - looks[0].same_t > BANNER_LINGER_S:
                 looks.popleft()
+
+    def _drop_off_board_zones(self) -> None:
+        for popup in self.popups:
+            if popup.off_board and popup.avoid and popup.streak:
+                self._guard(popup, None)
+
+    def _zones_due(self, y: int | None) -> None:
+        """Runs just before an input is checked against the no-tap zones."""
+        # The bot's first swipes on a new board can come before the next tick drops
+        # an off-board popup's zone (see _handle_popups).
+        if self.board_visible and self.expected_panel is not None:
+            self._drop_off_board_zones()
+        if self._sys_ui:
+            self._banner_due(y)
 
     def _banner_due(self, y: int | None) -> None:
         """Before an input at height y (None: any) is checked against the no-tap zones:
