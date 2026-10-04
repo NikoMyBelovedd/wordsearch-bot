@@ -930,6 +930,7 @@ class Bot:
             log("PACE", f"{what} for {seconds / 60:.0f} min, back at {back}")
             self.watcher.idle.set()
         self.watcher.resting.set()
+        start = time.time()
         try:
             while not self.stop_event.is_set() and (left := until - time.time()) > 0:
                 self._hold()
@@ -940,6 +941,8 @@ class Bot:
             self.resting_until = None
             if seconds >= IDLE_RELAUNCH_S:
                 self._relaunch = True
+            if self.pacer:
+                self.pacer.rested(time.time() - start)
 
     def _hold(self) -> None:
         """While AutomationHQ has paused the bot, wait here; then carry on from here."""
@@ -955,8 +958,11 @@ class Bot:
         finally:
             self.watcher.idle.clear()
             self.status = status
-        if time.monotonic() - since >= IDLE_RELAUNCH_S:
+        paused = time.monotonic() - since
+        if paused >= IDLE_RELAUNCH_S:
             self._relaunch = True  # the game ignores touches after sitting idle
+        if self.pacer:
+            self.pacer.rested(paused)
         if not self.stop_event.is_set():
             log("AHQ", "resumed")
 
@@ -982,6 +988,8 @@ class Bot:
         self.stop_event.wait(wait)
         self.watcher.idle.clear()
         self._relaunch = True
+        if self.pacer:
+            self.pacer.break_taken()  # the night was the rest
 
     def _load_swiped(self) -> tuple[set[str], list[str] | None]:
         try:
