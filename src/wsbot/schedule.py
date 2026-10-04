@@ -159,6 +159,13 @@ class Pacer:
         self.last_break_end = time.time()
         self.next_break_after = self._draw_break_gap()
 
+    def rested(self, seconds: float) -> None:
+        """Any stretch of not playing as long as a break (the night, waiting for the
+        window, a pause) was one: restart the play clock. Without this the clock ran
+        through the night and the first level of the morning was followed by a break."""
+        if self.s.breaks and seconds >= self.s.break_len_min * 60:
+            self.break_taken()
+
     def next_break_at(self) -> float | None:
         if not self.s.breaks:
             return None
