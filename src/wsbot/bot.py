@@ -10,19 +10,21 @@ Solving escalates through passes until the level ends:
                  drops some back-to-back swipes, and the exhaustive pass reaches short
                  ones (MILK, OIL) only at its end and never re-fires a swiped word
                  (ICICLES, rank 42,102, waited for the repeat pass)
-  3. careful     the unlit 5+ letter dictionary words once more, slowly with a long
-                 breath: a long theme word the game dropped twice
-  4. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
+  3. paths       the other paths of 3-4 letter words: passes 1-2 fire one path a
+                 word, and TAB also lay inside BATTER, read backwards
+  4. careful     the unlit dictionary words still open (see _open) once more, slowly
+                 with a long breath: a theme word the game dropped twice
+  5. exhaustive  every straight line of 3+ letters with an unlit cell, never swiped
                  yet: finds words the dictionary doesn't know (ORANGUTAN)
-  5. slow        lines outside the dictionary on unlit cells, once more, slowly: the
+  6. slow        lines outside the dictionary on unlit cells, once more, slowly: the
                  game drops a swipe now and then, and the exhaustive pass has one shot
-  6. repeat      last resort: every path of every word not yet highlighted, even
+  7. repeat      last resort: every path of every word not yet highlighted, even
                  ones already swiped
-  7. restart     relaunch the app and start the level over
+  8. restart     relaunch the app and start the level over
 
-A word is swiped once per level before the repeat pass: re-swiping one the game has
-already taken (a bonus word) pops an "already collected" toast over the bottom rows
-that swallows the swipes under it.
+A word is swiped once per level before the repeat pass (a path once, from the paths
+pass on): re-swiping one the game has already taken (a bonus word) pops an "already
+collected" toast over the bottom rows that swallows the swipes under it.
 """
 
 from __future__ import annotations
@@ -91,6 +93,10 @@ FADED = "#"
 LEARN_MIN_LEN = 4
 LEARN_MAX = 16  # more lines than this fit what lit up: a misread frame, learn nothing
 LEARNED_RANK = 1_000  # learned theme words go early in the fast pass
+
+
+# A swipe as kept in the level's swiped state: (word, start cell, end cell).
+SwipedPath = tuple[str, tuple[int, int], tuple[int, int]]
 
 
 class InputBlocked(Exception):
@@ -181,7 +187,8 @@ class Bot:
         # Words swiped on the current level, saved so a bot restart mid-level doesn't
         # re-swipe them (each re-swipe of a taken word pops a toast).
         self._swiped_path = local_file(root, serial, "level_swiped.json")
-        self.swiped, self._swiped_grid = self._load_swiped()
+        # ...and the paths they were swiped on (the exhaustive and paths passes go by path)
+        self.swiped, self.swiped_paths, self._swiped_grid = self._load_swiped()
         self._dumped: dict[str, float] = {}  # dump kind -> when (see _dump)
 
     # ---- board ---------------------------------------------------------------
@@ -403,6 +410,7 @@ class Bot:
                 self.stats.swipes += 1
                 self.fired_cells.update(path_cells(hit))
                 self.swiped.add(hit.word)
+                self.swiped_paths.add((hit.word, hit.start, hit.end))
                 fired.append((t, hit))
                 self.pass_fired.append(hit)
             since = self.watcher.cover_since
@@ -433,16 +441,19 @@ class Bot:
     def solve_level(self, board: Board, grid: list[str]) -> bool:
         """Escalating passes (see module docstring). True once the level ends."""
         hits = self.words.solve(grid)
-        seen: set[str] = set()
-        fast = [h for h in hits if not (h.word in seen or seen.add(h.word))]
+        if self._swiped_grid is None or not same_level(grid, self._swiped_grid):
+            # kept across restarts of a level
+            self.swiped, self.swiped_paths, self._swiped_grid = set(), set(), grid
+        # Back on a level after a restart, some words are lit already: a path through
+        # them is less likely the one still to find (one frame read, only then).
+        lit = (self._lit_cells(board) or set()) if self.swiped else set()
+        fast = pick_paths(hits, lit)
         # Words lying inside a longer one go last. The game ignores a swipe on cells it
         # is still animating from a word it just took, for about a second, and those
         # sub-words are bonus words it takes: ART fired before ARTICLE ate ARTICLE twice
         # (ADA -> CICADA, ORC -> ORCHARD, REG -> CHARGER). Not longest-first overall:
         # theme words back to back lost DRAGONFLY and WHEAT.
         fast = _subwords_last(fast)
-        if self._swiped_grid is None or not same_level(grid, self._swiped_grid):
-            self.swiped, self._swiped_grid = set(), grid  # kept across restarts of a level
 
         def new(todo: list[Hit]) -> list[Hit]:
             done = set(self.swiped)  # snapshot: repeated non-words within a pass are fine
@@ -450,7 +461,6 @@ class Bot:
 
         self.maybe_eaten: set[Hit] = set()  # fired just before a popup (see burst)
         common = [h for h in fast if h.rank < RETRY_RANK or len(h.word) >= RETRY_SHORT_LEN]
-        long_words = [h for h in fast if len(h.word) >= RETRY_SHORT_LEN]
 
         def open_long(hits: list[Hit]) -> list[Hit]:
             todo = self._unlit(board, hits)
@@ -465,23 +475,33 @@ class Bot:
             low = board.rows - 2
             return sorted(_subwords_last(todo), key=lambda h: max(h.start[0], h.end[0]) < low)
 
+        def alternates() -> list[Hit]:
+            lit = self._lit_cells(board)
+            if lit is not None:
+                self.found_cells = lit
+            return self._new_paths(other_paths(hits, fast, self.found_cells))
+
         p = self.pacing
         passes = [
             ("fast", lambda: new(self._unlit(board, fast)), p.swipe_ms, p.gap_s, 0),
             # not filtered by new(): these are the swiped words the game didn't take
             ("retry", retry, p.swipe_ms, p.retry_gap_s, 0),
+            # the other paths of short words: the fast and retry passes fire one path a
+            # word, and 8.6% of 3-letter words lie on 2+ paths (4 letters: 0.9%), one
+            # of them often inside a longer word (TAB in BATTER)
+            ("paths", alternates, p.swipe_ms, p.retry_gap_s, 0),
             # still unlit after two tries: one slow, spaced-out try before the long
             # exhaustive pass (a few swipes, a few seconds)
             (
                 "careful",
-                lambda: [h for h in self._unlit(board, long_words) if _open(h, self.found_cells)],
+                lambda: [h for h in self._unlit(board, fast) if _open(h, self.found_cells)],
                 p.refire_swipe_ms,
                 p.careful_gap_s,
                 0,
             ),
             (
                 "exhaustive",
-                lambda: new(self._unlit(board, all_lines(grid), most_unlit_first=True)),
+                lambda: self._new_paths(self._unlit(board, all_lines(grid), most_unlit_first=True)),
                 p.swipe_ms,
                 p.gap_s,
                 PROGRESS_CHECK_EVERY,
@@ -496,7 +516,7 @@ class Bot:
         try:
             for name, pick, ms, gap, check_every in passes:
                 todo = pick()
-                if not todo and name in ("retry", "careful", "slow"):
+                if not todo and name in ("retry", "paths", "careful", "slow"):
                     continue
                 self.phase = f"{name} ({len(todo)})"
                 if name != "fast":
@@ -516,6 +536,13 @@ class Bot:
             log("WARN", "the game ignores touches on the board; restarting")
             self._input_blocked = True
         return False
+
+    def _new_paths(self, todo: list[Hit]) -> list[Hit]:
+        """Hits not swiped yet on their own path. By path, not word: TAB swiped inside
+        BATTER must not keep the real TAB, on other cells, from its turn in the
+        exhaustive pass (it waited ~700 swipes for the repeat pass)."""
+        done = set(self.swiped_paths)  # snapshot, like new()
+        return [h for h in todo if (h.word, h.start, h.end) not in done]
 
     # ---- learning theme words the wordlist lacks -------------------------------
 
@@ -998,12 +1025,14 @@ class Bot:
         if self.pacer:
             self.pacer.break_taken()  # the night was the rest
 
-    def _load_swiped(self) -> tuple[set[str], list[str] | None]:
+    def _load_swiped(self) -> tuple[set[str], set[SwipedPath], list[str] | None]:
         try:
             data = json.loads(self._swiped_path.read_text(encoding="utf-8"))
-            return set(data["words"]), data["grid"]
-        except (OSError, ValueError, KeyError):
-            return set(), None
+            # "paths" came later: a file without them loads with none
+            paths = {(w, (r0, c0), (r1, c1)) for w, r0, c0, r1, c1 in data.get("paths", [])}
+            return set(data["words"]), paths, data["grid"]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return set(), set(), None
 
     def _forget_swiped(self, *, everything: bool) -> None:
         """A stuck level gets a fresh try: swipes fired while the game ignored input
@@ -1014,13 +1043,19 @@ class Bot:
         before = len(self.swiped)
         if everything:
             self.swiped.clear()
+            self.swiped_paths.clear()
         else:
             self.swiped = {w for w in self.swiped if w in self.words.rank}
+            self.swiped_paths = {p for p in self.swiped_paths if p[0] in self.words.rank}
         self._save_swiped()
         log("RECOVERY", f"will re-swipe {before - len(self.swiped)} words on this level")
 
     def _save_swiped(self) -> None:
-        data = {"grid": self._swiped_grid, "words": sorted(self.swiped)}
+        data = {
+            "grid": self._swiped_grid,
+            "words": sorted(self.swiped),
+            "paths": sorted([w, *a, *b] for w, a, b in self.swiped_paths),
+        }
         tmp = self._swiped_path.with_suffix(".tmp")
         try:
             self._swiped_path.parent.mkdir(exist_ok=True)
@@ -1115,6 +1150,53 @@ def spread(hits: list[Hit], recent: int = 3, window: int = 24) -> list[Hit]:
     return out
 
 
+def pick_paths(hits: list[Hit], lit: set[tuple[int, int]] | None = None) -> list[Hit]:
+    """One path per word, in rank order: the one most likely to be the word's own.
+
+    Hits sort by (rank, word, start), so the top-left path used to win, and a short word
+    is often also a piece of a longer one: TAB at 2,4-2,6 inside BATTER (read backwards)
+    took the turn of the real TAB at 6,3-4,3 (level 4999). Fired there it is a bonus
+    word, or reads as found once BATTER lights up, and the real one waited ~700
+    exhaustive swipes for the repeat pass. So: paths not inside another hit first, then
+    the fewest cells already lit, then rank and grid order."""
+    lit = lit or set()
+    paths: dict[str, list[int]] = {}
+    for i, h in enumerate(hits):
+        paths.setdefault(h.word, []).append(i)
+    cells = [frozenset(path_cells(h)) for h in hits]
+    picked = []
+    for idx in paths.values():
+        if len(idx) > 1:  # most words have one path: skip the comparisons
+            idx = sorted(idx, key=lambda i: (_inside(cells[i], cells), len(cells[i] & lit), i))
+        picked.append(idx[0])
+    return [hits[i] for i in sorted(picked)]
+
+
+def other_paths(hits: list[Hit], picked: list[Hit], lit: set[tuple[int, int]]) -> list[Hit]:
+    """The paths of 3-4 letter words other than the one picked, for the paths pass: not
+    all lit, and common or open (see _open), like the retry pass's words. A word found
+    where it was fired (its picked path lit, and not as a piece of a longer word) is
+    skipped: another path would only pop the "already collected" toast."""
+    pick = {h.word: h for h in picked}
+    cells = [frozenset(path_cells(h)) for h in hits]
+    by_hit = dict(zip(hits, cells, strict=True))
+    out = []
+    for h, c in by_hit.items():
+        p = pick.get(h.word)
+        if p is None or h == p or len(h.word) > RETRY_SHORT_LEN or c <= lit:
+            continue
+        if by_hit[p] <= lit and not _inside(by_hit[p], cells):
+            continue
+        if h.rank < RETRY_RANK or _open(h, lit):
+            out.append(h)
+    return out
+
+
+def _inside(cells: frozenset[tuple[int, int]], others: list[frozenset[tuple[int, int]]]) -> bool:
+    """The path's cells all lie on a longer path."""
+    return any(cells < o for o in others)
+
+
 def _subwords_last(hits: list[Hit]) -> list[Hit]:
     """Same order, except hits whose cells all lie inside another hit's go to the end."""
     cells = [set(path_cells(h)) for h in hits]
@@ -1132,10 +1214,13 @@ def _mostly_unlit(hit: Hit, lit: set[tuple[int, int]]) -> bool:
 
 
 def _open(hit: Hit, lit: set[tuple[int, int]]) -> bool:
-    """A rare word worth re-firing: 5+ letters mostly unlit, or 4 letters all unlit."""
+    """A word worth re-firing: 5+ letters mostly unlit, 4 letters all unlit, or a common
+    3-letter one all unlit (TAB, 3,650: short words were never fired slowly)."""
     if len(hit.word) >= RETRY_MIN_LEN:
         return _mostly_unlit(hit, lit)
-    return len(hit.word) == RETRY_SHORT_LEN and not any(c in lit for c in path_cells(hit))
+    if len(hit.word) < RETRY_SHORT_LEN and hit.rank >= RETRY_RANK:
+        return False
+    return not any(c in lit for c in path_cells(hit))
 
 
 def _whole_run(hit: Hit, lit: set[tuple[int, int]]) -> bool:

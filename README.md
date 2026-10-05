@@ -433,7 +433,7 @@ Crop from **inside** the button (x, y, width, height, in the full-screen picture
 - **Reading the board.** It finds the white letter panel, splits it into cells, and reads each glyph by template matching against the game's font (Lato Black). Tesseract acts as a second opinion. A new glyph shape is learned only when **both** agree, so one bad read can't poison the cache.
 - **Solving.** An 8-direction prefix search over a frequency-ordered wordlist solves a board in about 0.5 ms. Common words get swiped first.
 - **Pass ladder.**
-  1. *Fast:* every dictionary word once.
+  1. *Fast:* every dictionary word once, on its likeliest path: not a copy lying inside a longer word (*TAB* inside *BATTER* read backwards). The other paths of 3-4 letter words get a short pass of their own if the level isn't done.
   2. *Exhaustive:* every straight line with an unlit cell, most untouched cells first. This catches theme words the dictionary lacks, like *ORANGUTAN* or *SCAVENGER*.
   3. *Repeat:* dictionary words again, slower.
   4. *Restart* the app. The level's "already swiped" memory is then partly forgotten, so swipes the game ignored get fired again.
