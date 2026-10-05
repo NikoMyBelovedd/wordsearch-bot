@@ -166,6 +166,11 @@ class Pacer:
         if self.s.breaks and seconds >= self.s.break_len_min * 60:
             self.break_taken()
 
+    def use(self, schedule: Schedule) -> None:
+        """Switch schedules (a catch-up day ended): keep the play clock, redraw the gap."""
+        self.s = schedule
+        self.next_break_after = self._draw_break_gap()
+
     def next_break_at(self) -> float | None:
         if not self.s.breaks:
             return None

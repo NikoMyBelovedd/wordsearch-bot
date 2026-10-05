@@ -397,6 +397,8 @@ uv run wsbot --headless --serial emulator-5554 --fast --levels 20
 
 Logs are also written to `local/wsbot.log`.
 
+**Catching up a missed day:** put a number of extra levels in a file `local/catchup-once` (or set `WSBOT_CATCHUP`) before starting. That run plays that many more levels today, with no breaks; the file is deleted as it's read, and at midnight the normal daily target and breaks come back.
+
 ## Advanced: teaching the bot a new popup
 
 When the bot meets a screen it doesn't know, it saves `diagnostics/unknown_popup_*.png` (once per different screen), and after a few seconds it taps the screen to try to clear it, but only while it's sure it is still in the game. If the screen stays unknown it relaunches the game (45 s), then restarts the game and the phone connection (another minute), and finally stops with an error so AutomationHQ restarts it. To teach it the popup for good:
@@ -431,7 +433,7 @@ Crop from **inside** the button (x, y, width, height, in the full-screen picture
 - **Reading the board.** It finds the white letter panel, splits it into cells, and reads each glyph by template matching against the game's font (Lato Black). Tesseract acts as a second opinion. A new glyph shape is learned only when **both** agree, so one bad read can't poison the cache.
 - **Solving.** An 8-direction prefix search over a frequency-ordered wordlist solves a board in about 0.5 ms. Common words get swiped first.
 - **Pass ladder.**
-  1. *Fast:* every dictionary word once.
+  1. *Fast:* every dictionary word once, on its likeliest path: not a copy lying inside a longer word (*TAB* inside *BATTER* read backwards). The other paths of 3-4 letter words get a short pass of their own if the level isn't done.
   2. *Exhaustive:* every straight line with an unlit cell, most untouched cells first. This catches theme words the dictionary lacks, like *ORANGUTAN* or *SCAVENGER*.
   3. *Repeat:* dictionary words again, slower.
   4. *Restart* the app. The level's "already swiped" memory is then partly forgotten, so swipes the game ignored get fired again.
