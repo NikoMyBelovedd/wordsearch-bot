@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -96,6 +96,8 @@ class Goal:
     schedule: Schedule | None = None  # None = no pacing (single level)
     session_levels: int = 0
     session_target: int | None = None  # stop after this many levels this run (--levels)
+    catchup_day: str | None = None  # day a one-off catch-up raised the quota (see add_catchup)
+    _base: tuple | None = None  # (per_day, schedule, title) to restore when that day ends
 
     @classmethod
     def play(cls, progress: Progress) -> Goal:
@@ -139,6 +141,24 @@ class Goal:
 
     def quota_reached_today(self) -> bool:
         return self.per_day is not None and self.done_today >= self.per_day
+
+    def add_catchup(self, extra: int) -> None:
+        """Play `extra` more levels today, with no breaks. Lasts only for this run and
+        only until midnight (local/catchup-once or $WSBOT_CATCHUP arms it, see bot.py)."""
+        if self.per_day is None or self.schedule is None:
+            return  # nothing paced to catch up on (a single level)
+        self._base = (self.per_day, self.schedule, self.title)
+        self.per_day += extra
+        self.schedule = replace(self.schedule, per_day=self.per_day, break_every_max=0)
+        self.title += f" · +{extra:,} catch-up today"
+        self.catchup_day = today()
+
+    def end_catchup_if_new_day(self) -> bool:
+        if self.catchup_day is None or self.catchup_day == today():
+            return False
+        self.per_day, self.schedule, self.title = self._base
+        self.catchup_day = self._base = None
+        return True
 
     def record_level(self) -> None:
         self.session_levels += 1

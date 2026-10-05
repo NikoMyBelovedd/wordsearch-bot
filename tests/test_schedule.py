@@ -71,3 +71,21 @@ def test_sleep_until_tomorrow_restarts_the_clock(tmp_path, monkeypatch):
     p.last_break_end = time.time() - 10 * 3600
     b._sleep_until_tomorrow()
     assert p.break_due() == 0
+
+
+def test_catchup_day_ends_at_midnight(tmp_path, monkeypatch):
+    from wsbot.bot import _arm_catchup
+    from wsbot.goal import Goal
+
+    goal = Goal.custom(Progress(tmp_path / "p.json"), Schedule(per_day=500))
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / "catchup-once").write_text("300\n", encoding="utf-8")
+    monkeypatch.delenv("WSBOT_CATCHUP", raising=False)
+    _arm_catchup(goal, tmp_path)
+    assert goal.per_day == 800 and goal.schedule.per_day == 800
+    assert not goal.schedule.breaks
+    assert not (tmp_path / "local" / "catchup-once").exists()  # this launch only
+    assert not goal.end_catchup_if_new_day()
+    monkeypatch.setattr("wsbot.goal.today", lambda: "2999-01-01")
+    assert goal.end_catchup_if_new_day()
+    assert goal.per_day == 500 and goal.schedule.breaks

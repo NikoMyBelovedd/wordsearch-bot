@@ -397,6 +397,8 @@ uv run wsbot --headless --serial emulator-5554 --fast --levels 20
 
 Logs are also written to `local/wsbot.log`.
 
+**Catching up a missed day:** put a number of extra levels in a file `local/catchup-once` (or set `WSBOT_CATCHUP`) before starting. That run plays that many more levels today, with no breaks; the file is deleted as it's read, and at midnight the normal daily target and breaks come back.
+
 ## Advanced: teaching the bot a new popup
 
 When the bot meets a screen it doesn't know, it saves `diagnostics/unknown_popup_*.png` (once per different screen), and after a few seconds it taps the screen to try to clear it, but only while it's sure it is still in the game. If the screen stays unknown it relaunches the game (45 s), then restarts the game and the phone connection (another minute), and finally stops with an error so AutomationHQ restarts it. To teach it the popup for good:

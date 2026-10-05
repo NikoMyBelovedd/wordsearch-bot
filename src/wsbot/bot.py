@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import threading
 import time
 import traceback
@@ -155,6 +156,7 @@ class Bot:
         self.watcher.on_fatal = self._fatal
         getattr(self.device, "set_fatal_handler", lambda _: None)(self._fatal)
         self.pacing = Pacing(swipe_ms=self.device.swipe_ms)
+        _arm_catchup(goal, root)
         self.pacer = Pacer(goal.schedule, goal.progress) if goal.schedule else None
         self.resting_until: float | None = None  # epoch; set while idling / on a break
         self.stats = Stats()
@@ -802,10 +804,15 @@ class Bot:
         self.watcher.start()
         previous: list[str] | None = None
         restarts_this_level = 0
+        if self.goal.catchup_day:
+            log("GOAL", f"catch-up run: {self.goal.per_day:,} levels today, no breaks")
         try:
             while not self.stop_event.is_set():
                 try:
                     self._hold()
+                    if self.goal.end_catchup_if_new_day() and self.pacer:
+                        self.pacer.use(self.goal.schedule)
+                        log("GOAL", f"catch-up over; back to {self.goal.per_day:,}/day with breaks")
                     if self.goal.finished():
                         g = self.goal
                         if g.session_target is not None and g.session_levels >= g.session_target:
@@ -1039,6 +1046,30 @@ class Bot:
             f"board_visible={self.watcher.board_visible} fps={self.watcher.fps:.1f}"
         )
         prune_pngs(self.diagnostics, MAX_DIAGNOSTICS)
+
+
+def _arm_catchup(goal: Goal, root: Path) -> None:
+    """A one-off catch-up day: play N more levels today, no breaks (Goal.add_catchup).
+    N comes from $WSBOT_CATCHUP or local/catchup-once, a file holding N that is deleted
+    as it's read, so only this launch gets them. Read here, not in start.sh, so it
+    works however the bot is started (start.bat, start.ps1, AutomationHQ)."""
+    if goal.per_day is None or goal.schedule is None:
+        return  # leave the file for a paced run
+    once = root / "local" / "catchup-once"
+    text = os.environ.get("WSBOT_CATCHUP") or ""
+    if not text and once.is_file():
+        try:
+            text = once.read_text(encoding="utf-8")
+            once.unlink()
+        except OSError as exc:
+            log("WARN", f"couldn't read {once.name}: {exc!r}")
+    try:
+        extra = int(text.strip() or 0)
+    except ValueError:
+        log("WARN", f"catch-up: {text.strip()!r} is not a number of levels; ignored")
+        return
+    if extra > 0:
+        goal.add_catchup(extra)
 
 
 def same_level(a: list[str], b: list[str]) -> bool:
