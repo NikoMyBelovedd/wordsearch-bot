@@ -1,8 +1,12 @@
 """Device layer: frames, taps, swipes, and the SAFETY no-tap zones.
 
 Every coordinate in the bot is authored in the 1080x2400 calibration space and
-scaled to the live device here. Every input holds `input_lock`, so the watcher
-thread can never tap while the main thread is mid-swipe.
+scaled to the live device here. The game fits the screen's width, so a phone of
+another shape is scaled by its width alone (calibration space 1080 wide, as tall as
+its aspect makes it): the UI keeps the size the templates were cut at, and the top
+bar's no-tap zones stay where its buttons are (measured from the top). Every input
+holds `input_lock`, so the watcher thread can never tap while the main thread is
+mid-swipe.
 
 Frames come from uiautomator2 (~115 ms). Input goes through one persistent
 `adb shell` running `input swipe`/`input tap` (~50 ms per swipe vs ~330 ms via u2),
@@ -36,6 +40,12 @@ FORBIDDEN_ZONES: dict[str, tuple[int, int, int, int]] = {
     "star_bonus_jar": (165, 140, 280, 270),
     "coins_and_shop": (700, 140, 1050, 270),
 }
+
+
+def calib_size(width: int, height: int) -> tuple[int, int]:
+    """Calibration space for an Android screen: 1080 wide, height by its aspect (a
+    1080x2400 phone is 1080x2400; 720x1280 (16:9) is 1080x1920; 1440x3120 is 1080x2340)."""
+    return CALIB_W, round(height * CALIB_W / width)
 
 
 class SafetyError(RuntimeError):
@@ -212,7 +222,10 @@ class Device(BaseDevice):
         self._u2_retry_at = 0.0
         w, h = self.d.window_size()
         self.width, self.height = w, h
-        self.sx, self.sy = w / CALIB_W, h / CALIB_H
+        self.calib = calib_size(w, h)
+        self.sx = self.sy = w / CALIB_W
+        # Before any board was read: the screen's middle, wherever this shape puts it.
+        self.board_center = (CALIB_W // 2, round(self.calib[1] * 1325 / CALIB_H))
         # While a level is being solved, everything below the board is off limits: the
         # booster row (ads, burst hint, lightbulb, shuffle) sits there and moves down on
         # taller boards. Set by the bot per level; None between levels.
@@ -256,8 +269,8 @@ class Device(BaseDevice):
             img = self._u2_frame()
         if img is None:
             img = self._screencap_frame()
-        if img.shape[1] != CALIB_W or img.shape[0] != CALIB_H:
-            img = cv2.resize(img, (CALIB_W, CALIB_H), interpolation=cv2.INTER_AREA)
+        if (img.shape[1], img.shape[0]) != self.calib:
+            img = cv2.resize(img, self.calib, interpolation=cv2.INTER_AREA)
         return img
 
     def _u2_frame(self) -> np.ndarray | None:

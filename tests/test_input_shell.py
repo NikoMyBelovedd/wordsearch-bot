@@ -1,4 +1,4 @@
-"""The Android input shell: a wedged adb shell can't freeze the bot."""
+"""The Android device layer: a wedged adb shell can't freeze the bot; screen scaling."""
 
 from __future__ import annotations
 
@@ -47,3 +47,20 @@ def test_a_shell_that_never_answers_is_killed_and_raises(monkeypatch):
     s._spawn = shell(ECHO)._spawn  # the next input opens a fresh shell
     s.run("input tap 1 2")
     s.close()
+
+
+def test_android_screens_scale_by_width_and_keep_their_shape():
+    # The game fits the width: templates and the top bar's zones only line up when the
+    # frame isn't stretched to 1080x2400.
+    assert device.calib_size(1080, 2400) == (1080, 2400)  # the calibration phone
+    assert device.calib_size(720, 1280) == (1080, 1920)  # 16:9
+    assert device.calib_size(1440, 3120) == (1080, 2340)  # 19.5:9
+
+
+def test_taps_scale_the_same_both_ways(monkeypatch):
+    d = device.Device.__new__(device.Device)
+    d.width, d.height = 720, 1280
+    d.calib = device.calib_size(720, 1280)
+    d.sx = d.sy = 720 / device.CALIB_W
+    assert d._scale(540, 960) == (360, 640)  # the middle of the screen
+    assert d._scale(216, 205) == (144, 137)  # the star: as far down as it is across
