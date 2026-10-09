@@ -150,7 +150,7 @@ def headless(
     except AlreadyRunning as exc:
         print(f"{exc} ({serial}).", file=sys.stderr)
         sys.exit(EXIT_ALREADY_RUNNING)
-    signal.signal(signal.SIGINT, lambda *_: bot.stop_event.set())
+    signal.signal(signal.SIGINT, lambda *_: stop(bot, serial))
     from .control import listen
 
     listen(bot.pause_event)
@@ -158,6 +158,17 @@ def headless(
     if bot.fatal:
         print(f"The bot stopped: {bot.fatal}", file=sys.stderr)
         sys.exit(EXIT_GAVE_UP)
+
+
+def stop(bot, serial: str) -> None:
+    """AutomationHQ's stop (SIGINT): end the run, and any wait for the iPhone to come
+    back (unplugged, reopen() waits for it and would hang the stop otherwise)."""
+    if serial.startswith("ios"):
+        from .ios_device import cancel_connect
+
+        cancel_connect()
+    bot.pause_event.clear()
+    bot.stop_event.set()
 
 
 def capture(serial: str, name: str, crop: str | None, level_done: bool) -> None:

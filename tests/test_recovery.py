@@ -251,3 +251,20 @@ def test_the_first_blind_tap_after_a_mid_level_vanish_waits_for_the_level_end_sc
     assert should(2.5), "between levels: 2.5 s as before"
     assert not should(2.5, at_least=Pacing().level_end_tap_s), "mid-level: not yet"
     assert should(Pacing().level_end_tap_s, at_least=Pacing().level_end_tap_s)
+
+
+def test_a_headless_stop_also_ends_a_wait_for_the_iphone(monkeypatch):
+    import threading
+
+    from wsbot import cli, ios_device
+
+    monkeypatch.setattr(ios_device, "_stop_waiting", threading.Event())
+    bot = SimpleNamespace(pause_event=threading.Event(), stop_event=threading.Event())
+    bot.pause_event.set()
+    cli.stop(bot, "ios")
+    assert bot.stop_event.is_set() and not bot.pause_event.is_set()
+    assert ios_device._stop_waiting.is_set()  # reopen() stops waiting for the phone
+    android = SimpleNamespace(pause_event=threading.Event(), stop_event=threading.Event())
+    monkeypatch.setattr(ios_device, "_stop_waiting", threading.Event())
+    cli.stop(android, "R5CT123")
+    assert android.stop_event.is_set() and not ios_device._stop_waiting.is_set()
