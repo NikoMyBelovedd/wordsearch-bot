@@ -614,3 +614,43 @@ def test_uncollapse_shortcut_keeps_every_answer():
         assert np.array_equal(got, want)
         resized += want is not img
     assert resized >= 10
+
+
+def _x_and_collect_run(tmp_path, monkeypatch, plan):
+    """Tick a watcher through frames with the close X always up and COLLECT per plan."""
+    from wsbot.imgio import imread
+
+    pops = ROOT / "templates" / "ios" / "popups"
+    collect, close = imread(pops / "collect.png"), imread(pops / "close_x_grey.png")
+    frames = []
+    for i, with_collect in enumerate(plan):
+        img = np.full((CALIB[1], CALIB[0], 3), (90, 140, 60 + i % 2), np.uint8)
+        img[300 : 300 + close.shape[0], 1000 : 1000 + close.shape[1]] = close
+        if with_collect:
+            img[1400 : 1400 + collect.shape[0], 400 : 400 + collect.shape[1]] = collect
+        frames.append(Shot(i, native_of(img), CALIB))
+    w = make_watcher(frames, tmp_path)
+    now = [100.0]
+    monkeypatch.setattr(watcher_mod.time, "monotonic", lambda: now[0])
+    for _ in plan:
+        w._tick()
+        now[0] += 0.2
+    return w.device.taps
+
+
+def test_close_x_waits_for_a_collect_that_fades_in_late(tmp_path, monkeypatch):
+    """User 2026-10-09: on bonus rewards the close X sometimes won over COLLECT. The X
+    shows first; 8 frames (~1.6 s) without COLLECT were enough to tap it."""
+    taps = _x_and_collect_run(tmp_path, monkeypatch, [False] * 15 + [True] * 5)  # 3 s late
+    assert taps and all(y > 1000 for _, y in taps), f"close X tapped: {taps}"
+
+
+def test_close_x_never_jumps_ahead_when_collect_flickers_out(tmp_path, monkeypatch):
+    plan = [True] * 3 + [False] * 4 + [True] * 3 + [False] * 10
+    taps = _x_and_collect_run(tmp_path, monkeypatch, plan)
+    assert taps and all(y > 1000 for _, y in taps), f"close X tapped: {taps}"
+
+
+def test_close_x_still_closes_a_popup_without_collect(tmp_path, monkeypatch):
+    taps = _x_and_collect_run(tmp_path, monkeypatch, [False] * 30)  # 6 s, nothing else
+    assert taps and all(y < 1000 for _, y in taps)

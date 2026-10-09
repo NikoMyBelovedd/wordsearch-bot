@@ -226,6 +226,8 @@
   },
   {
     "name": "close_x_grey",
+    "wait_after_higher": 3.0,
+    "min_seen": 4.0,
     "file": "close_x_grey.png",
     "threshold": 0.88,
     "cooldown": 1.5,

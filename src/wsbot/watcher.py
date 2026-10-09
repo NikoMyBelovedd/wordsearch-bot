@@ -165,6 +165,12 @@ class Popup:
     confirm: int = 1  # consecutive matching frames required before acting
     blocking: bool = True  # False: tapping it doesn't make the bot wait (a toast)
     holdoff: float = 0.0  # don't tap within this long of tapping any other popup
+    # don't tap within this long of a higher-priority entry matching (a close X must not
+    # win the moment the bonus popup's COLLECT flickers out for a frame)
+    wait_after_higher: float = 0.0
+    # only tap once it has been the top match this long without a break (a close X
+    # waits out a COLLECT that fades in after the popup's X is already showing)
+    min_seen: float = 0.0
     avoid: bool = False  # never tap: while it's visible its area is a no-tap zone (ad buttons)
     avoid_pad: tuple[int, int] = (40, 40)  # zone = template box grown by this (x, y)
     # A toast over the board: the y range (relative to the match) where it swallows swipes
@@ -188,6 +194,7 @@ class Popup:
     coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
     streak: int = 0
+    outranked_at: float = 0.0  # last time a higher-priority entry matched with this one
 
 
 @dataclass
@@ -265,6 +272,8 @@ def load_popups(folder: Path) -> list[Popup]:
                 confirm=e.get("confirm", 1),
                 blocking=e.get("blocking", True),
                 holdoff=e.get("holdoff", 0.0),
+                wait_after_higher=e.get("wait_after_higher", 0.0),
+                min_seen=e.get("min_seen", 0.0),
                 avoid=e.get("avoid", False),
                 avoid_pad=tuple(pad[:2]),
                 covers=tuple(e["covers"]) if "covers" in e else None,
@@ -788,10 +797,16 @@ class PopupWatcher(threading.Thread):
                 self._guard(popup, center if score >= popup.threshold else None)
                 continue
             if score >= popup.threshold:
-                popup.streak += 1
                 popup.seen_since = popup.seen_since or now
                 if hit is None:
+                    popup.streak += 1
                     hit = (popup, score, center)
+                else:
+                    # Outranked this frame: its confirm count starts over, so it can't
+                    # act the instant the higher button drops out for one frame.
+                    popup.streak = 0
+                    popup.seen_since = 0.0
+                    popup.outranked_at = now
             else:
                 popup.streak = 0
                 popup.seen_since = 0.0
@@ -822,6 +837,10 @@ class PopupWatcher(threading.Thread):
         # Closing the bonus popup while its claimed coins still fly leaves the game
         # ignoring every touch until a restart. It closes itself once they land.
         if now - self._last_tap < popup.holdoff:
+            return True
+        if now - popup.outranked_at < popup.wait_after_higher:
+            return True
+        if now - popup.seen_since < popup.min_seen:
             return True
         popup.last_hit = self._group_hit[group] = now
         self.hits[popup.name] += 1
