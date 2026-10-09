@@ -1261,6 +1261,14 @@ class IPhone:
             )
 
     async def _down(self, x: int, y: int) -> None:
+        """A new touch. One still held (a call that timed out or was cancelled after its
+        touch-down) is lifted first: otherwise this one reads as dragging it here."""
+        if self._held:
+            await self._up()
+        await self._move(x, y)
+
+    async def _move(self, x: int, y: int) -> None:
+        """The finger that is down moves here (or goes down here)."""
         self._held = (x, y)
         await self._send(CONTACT, x, y)
 
@@ -1270,21 +1278,34 @@ class IPhone:
             self._held = None
             await self._send(RELEASE, x, y)
 
+    async def _lift(self) -> None:
+        """_up for a finally: never hides the error that got us there, never hangs."""
+        try:
+            await asyncio.wait_for(self._up(), 5)
+        except Exception as exc:  # the touch stays marked held: the next _down lifts it
+            dbg(f"touch release failed: {exc!r}")
+
     async def _tap(self, x: int, y: int, hold_ms: float) -> None:
-        await self._down(x, y)
-        await asyncio.sleep(hold_ms / 1000)
-        await self._up()
+        try:
+            await self._down(x, y)
+            await asyncio.sleep(hold_ms / 1000)
+        finally:
+            await self._lift()
 
     async def _swipe(self, x1: int, y1: int, x2: int, y2: int, ms: float, steps: int) -> None:
         steps = max(1, steps)
-        await self._down(x1, y1)
-        t0 = time.perf_counter()
-        for i in range(1, steps + 1):
-            delay = t0 + ms / 1000 * i / steps - time.perf_counter()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            await self._down(round(x1 + (x2 - x1) * i / steps), round(y1 + (y2 - y1) * i / steps))
-        await self._up()
+        try:
+            await self._down(x1, y1)
+            t0 = time.perf_counter()
+            for i in range(1, steps + 1):
+                delay = t0 + ms / 1000 * i / steps - time.perf_counter()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await self._move(
+                    round(x1 + (x2 - x1) * i / steps), round(y1 + (y2 - y1) * i / steps)
+                )
+        finally:
+            await self._lift()
 
     async def _press(self, button: tuple[int, int], ms: float = 60) -> None:
         await self._srv._ensure_hid()
@@ -1344,7 +1365,7 @@ class IPhone:
             await self._down(*us[0])
             for u in us[1:]:
                 await asyncio.sleep(step_ms / 1000)
-                await self._down(*u)
+                await self._move(*u)
 
         self._do(go)
 
