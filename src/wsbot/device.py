@@ -11,6 +11,7 @@ because there is no adb process to spawn per gesture.
 
 from __future__ import annotations
 
+import queue
 import re
 import subprocess
 import threading
@@ -41,44 +42,88 @@ class SafetyError(RuntimeError):
     """Raised when an input would land in a forbidden zone."""
 
 
+class InputTimeout(OSError):
+    """The input shell didn't answer in time (a wedged adb shell or USB link)."""
+
+
 class ShellInput:
-    """A long-lived `adb shell` that runs input commands and waits for each to finish."""
+    """A long-lived `adb shell` that runs input commands and waits for each to finish.
+
+    Replies are read on a helper thread, so a wedged shell (adb server or USB stalled
+    without closing the pipe) can't freeze the caller while it holds `input_lock`: past
+    REPLY_TIMEOUT_S the shell is killed and InputTimeout raised; the next input opens a
+    fresh one."""
 
     SENTINEL = b"__wsbot_ok__"
+    REPLY_TIMEOUT_S = 10.0
 
     def __init__(self, serial: str) -> None:
         self.serial = serial
         self.proc: subprocess.Popen[bytes] | None = None
+        self.lines: queue.Queue[bytes | None] = queue.Queue()
+
+    def _spawn(self) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(
+            ["adb", "-s", self.serial, "shell"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,  # bytes, not text: Windows text pipes would turn \n into \r\n
+        )
 
     def _open(self) -> subprocess.Popen[bytes]:
         if self.proc is None or self.proc.poll() is not None:
-            self.proc = subprocess.Popen(
-                ["adb", "-s", self.serial, "shell"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,  # bytes, not text: Windows text pipes would turn \n into \r\n
-            )
+            self.proc = self._spawn()
+            self.lines = lines = queue.Queue()
+            stdout = self.proc.stdout
+
+            def read() -> None:
+                try:
+                    assert stdout
+                    for line in iter(stdout.readline, b""):
+                        lines.put(line)
+                except (OSError, ValueError):
+                    pass
+                lines.put(None)  # closed
+
+            threading.Thread(target=read, daemon=True, name="input-shell").start()
         return self.proc
 
     def run(self, cmd: str) -> None:
         for attempt in range(2):
             proc = self._open()
+            lines = self.lines
             try:
-                assert proc.stdin and proc.stdout
+                assert proc.stdin
                 proc.stdin.write(f"{cmd}; echo {self.SENTINEL.decode()}\n".encode())
                 proc.stdin.flush()
+                deadline = time.monotonic() + self.REPLY_TIMEOUT_S
                 while True:
-                    line = proc.stdout.readline()
-                    if not line:
+                    try:
+                        line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
+                    except queue.Empty:
+                        log(
+                            "RECOVERY",
+                            f"input shell silent for {self.REPLY_TIMEOUT_S:.0f}s; killed",
+                        )
+                        self.kill()
+                        raise InputTimeout(f"no reply to {cmd.split()[1]!r}") from None
+                    if line is None:
                         raise BrokenPipeError("adb shell closed")
                     if line.strip() == self.SENTINEL:
                         return
+            except InputTimeout:
+                raise  # not sent again: it may have landed late
             except (BrokenPipeError, OSError) as exc:
                 log("RECOVERY", f"input shell died ({exc!r}); reopening")
                 self.proc = None
                 if attempt:
                     raise
+
+    def kill(self) -> None:
+        proc, self.proc = self.proc, None
+        if proc and proc.poll() is None:
+            proc.kill()
 
     def close(self) -> None:
         if self.proc and self.proc.poll() is None:
