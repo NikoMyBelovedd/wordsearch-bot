@@ -10,14 +10,12 @@ mid-swipe.
 
 Frames come from uiautomator2 (~115 ms). Input goes through one persistent
 `adb shell` running `input swipe`/`input tap` (~50 ms per swipe vs ~330 ms via u2),
-because there is no adb process to spawn per gesture.
+because there is no adb process to spawn per gesture. The adb layer itself (deadlines,
+screencap, apps, the input shell) is the shared `android.py` from ahq-device.
 """
 
 from __future__ import annotations
 
-import queue
-import re
-import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -25,8 +23,23 @@ from collections.abc import Callable
 import cv2
 import numpy as np
 
+from .android import Android, DeviceError, InputTimeout, ShellInput
 from .log import log
 from .shot import Shot
+
+__all__ = [
+    "CALIB_H",
+    "CALIB_W",
+    "FORBIDDEN_ZONES",
+    "BaseDevice",
+    "Device",
+    "DeviceError",
+    "InputTimeout",
+    "SafetyError",
+    "ShellInput",
+    "calib_size",
+    "open_device",
+]
 
 CALIB_W, CALIB_H = 1080, 2400
 U2_TIMEOUT_S = 2.5
@@ -50,94 +63,6 @@ def calib_size(width: int, height: int) -> tuple[int, int]:
 
 class SafetyError(RuntimeError):
     """Raised when an input would land in a forbidden zone."""
-
-
-class InputTimeout(OSError):
-    """The input shell didn't answer in time (a wedged adb shell or USB link)."""
-
-
-class ShellInput:
-    """A long-lived `adb shell` that runs input commands and waits for each to finish.
-
-    Replies are read on a helper thread, so a wedged shell (adb server or USB stalled
-    without closing the pipe) can't freeze the caller while it holds `input_lock`: past
-    REPLY_TIMEOUT_S the shell is killed and InputTimeout raised; the next input opens a
-    fresh one."""
-
-    SENTINEL = b"__wsbot_ok__"
-    REPLY_TIMEOUT_S = 10.0
-
-    def __init__(self, serial: str) -> None:
-        self.serial = serial
-        self.proc: subprocess.Popen[bytes] | None = None
-        self.lines: queue.Queue[bytes | None] = queue.Queue()
-
-    def _spawn(self) -> subprocess.Popen[bytes]:
-        return subprocess.Popen(
-            ["adb", "-s", self.serial, "shell"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0,  # bytes, not text: Windows text pipes would turn \n into \r\n
-        )
-
-    def _open(self) -> subprocess.Popen[bytes]:
-        if self.proc is None or self.proc.poll() is not None:
-            self.proc = self._spawn()
-            self.lines = lines = queue.Queue()
-            stdout = self.proc.stdout
-
-            def read() -> None:
-                try:
-                    assert stdout
-                    for line in iter(stdout.readline, b""):
-                        lines.put(line)
-                except (OSError, ValueError):
-                    pass
-                lines.put(None)  # closed
-
-            threading.Thread(target=read, daemon=True, name="input-shell").start()
-        return self.proc
-
-    def run(self, cmd: str) -> None:
-        for attempt in range(2):
-            proc = self._open()
-            lines = self.lines
-            try:
-                assert proc.stdin
-                proc.stdin.write(f"{cmd}; echo {self.SENTINEL.decode()}\n".encode())
-                proc.stdin.flush()
-                deadline = time.monotonic() + self.REPLY_TIMEOUT_S
-                while True:
-                    try:
-                        line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
-                    except queue.Empty:
-                        log(
-                            "RECOVERY",
-                            f"input shell silent for {self.REPLY_TIMEOUT_S:.0f}s; killed",
-                        )
-                        self.kill()
-                        raise InputTimeout(f"no reply to {cmd.split()[1]!r}") from None
-                    if line is None:
-                        raise BrokenPipeError("adb shell closed")
-                    if line.strip() == self.SENTINEL:
-                        return
-            except InputTimeout:
-                raise  # not sent again: it may have landed late
-            except (BrokenPipeError, OSError) as exc:
-                log("RECOVERY", f"input shell died ({exc!r}); reopening")
-                self.proc = None
-                if attempt:
-                    raise
-
-    def kill(self) -> None:
-        proc, self.proc = self.proc, None
-        if proc and proc.poll() is None:
-            proc.kill()
-
-    def close(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
 
 
 class BaseDevice:
@@ -217,7 +142,9 @@ class Device(BaseDevice):
         import uiautomator2 as u2  # Android only: an iPhone bot needn't load it (~20 MB)
 
         self.d = u2.connect(serial)
-        self.shell = ShellInput(serial)
+        # adb with a deadline on every call (10 s, screenshots 8 s), and the input shell.
+        self.phone = Android(serial, dry_run=dry_run, timeout=10.0, shot_timeout=8.0)
+        self.shell = ShellInput(serial, adb=self.phone.adb)
         self._u2_busy = threading.Event()
         self._u2_retry_at = 0.0
         w, h = self.d.window_size()
@@ -235,17 +162,11 @@ class Device(BaseDevice):
         self.refused = 0
         log("DEVICE", f"connected {serial} {w}x{h} dry_run={dry_run}")
 
-    def adb(self, *args: str, timeout: float = 10.0) -> subprocess.CompletedProcess[bytes]:
-        """One-shot adb command with a hard timeout (never hangs the caller)."""
-        return subprocess.run(
-            ["adb", "-s", self.serial, *args], capture_output=True, timeout=timeout, check=False
-        )
-
     def reconnect(self) -> None:
         """Rebuild both device channels after adb/uiautomator trouble."""
         log("RECOVERY", f"reconnecting to {self.serial}")
         try:
-            self.adb("wait-for-device", timeout=60)
+            self.phone.wait_for_device(timeout=60)
             import uiautomator2 as u2
 
             self.d = u2.connect(self.serial)
@@ -268,7 +189,7 @@ class Device(BaseDevice):
         if time.monotonic() >= self._u2_retry_at and not self._u2_busy.is_set():
             img = self._u2_frame()
         if img is None:
-            img = self._screencap_frame()
+            img = self.phone.screencap()
         if (img.shape[1], img.shape[0]) != self.calib:
             img = cv2.resize(img, self.calib, interpolation=cv2.INTER_AREA)
         return img
@@ -295,25 +216,18 @@ class Device(BaseDevice):
         self._u2_retry_at = time.monotonic() + 60
         return None
 
-    def _screencap_frame(self) -> np.ndarray:
-        raw = self.adb("exec-out", "screencap", timeout=8).stdout
-        if len(raw) < 16:
-            raise RuntimeError("screencap returned no data")
-        w, h = (int(v) for v in np.frombuffer(raw[:8], dtype=np.uint32))
-        pixels = np.frombuffer(raw[len(raw) - w * h * 4 :], dtype=np.uint8)
-        return cv2.cvtColor(pixels.reshape(h, w, 4), cv2.COLOR_RGBA2BGR)
-
     def foreground(self) -> str:
         """Package of the resumed activity ('' if unknown)."""
-        out = self.adb("shell", "dumpsys activity activities | grep -m1 topResumedActivity")
-        match = re.search(r" ([\w.]+)/", out.stdout.decode(errors="ignore"))
-        return match.group(1) if match else ""
+        return self.phone.foreground_package()
 
     def app_start(self, package: str) -> None:
-        self.adb("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
+        self.phone.start_app(package)
 
     def app_stop(self, package: str) -> None:
-        self.adb("shell", "am", "force-stop", package)
+        try:
+            self.phone.stop_app(package)
+        except DeviceError as exc:  # the start that follows is still worth trying
+            log("WARN", f"stopping {package} failed: {exc}")
 
     def close(self) -> None:
         self.shell.close()

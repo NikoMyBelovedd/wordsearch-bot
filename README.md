@@ -446,7 +446,8 @@ Crop from **inside** the button (x, y, width, height, in the full-screen picture
 | Module | Role |
 |---|---|
 | `device.py` | Android backend: uiautomator2 screenshots with an `adb screencap` fallback, and one persistent `adb shell` for fast input. Also the safety zones. |
-| `iphone.py` / `ios_device.py` | iOS backend: the phone's screen stream (HEVC, decoded with PyAV) and HID touch reports via pymobiledevice3's CoreDevice services. Frames are scaled so the Android calibration and templates apply. Two layouts: `se` (home-button iPhones, fixed zones) and `tall` (Face ID iPhones: zones placed from the top bar found on the live screen). On macOS it opens its own USB tunnel (`WSBOT_TUNNEL=auto\|userspace\|tunneld`). |
+| `android.py` | The adb layer under `device.py`: a deadline on every adb call, screencap, apps, the input shell. A copy from [ahq-device](https://github.com/AutomationHQ-F-N/ahq-device) (`uv run python sync.py --repo ../wordsearch-bot --module wsbot` there; `--check` only reports differences): change it there, not here. |
+| `iphone.py` / `ios_device.py` | iOS backend (`iphone.py` is a copy from ahq-device, like `android.py`): the phone's screen stream (HEVC, decoded with PyAV) and HID touch reports via pymobiledevice3's CoreDevice services. Frames are scaled so the Android calibration and templates apply. Two layouts: `se` (home-button iPhones, fixed zones) and `tall` (Face ID iPhones: zones placed from the top bar found on the live screen). On macOS it opens its own USB tunnel (`WSBOT_TUNNEL=auto\|userspace\|tunneld`). |
 | `board.py` | Panel and grid detection, partial-board rejection, highlighted-cell detection. |
 | `letters.py` | Glyph reading (64×64 templates plus Tesseract). |
 | `solver.py` | Dictionary prefix search. |

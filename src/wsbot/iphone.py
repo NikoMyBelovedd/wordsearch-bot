@@ -1,4 +1,5 @@
-"""An iPhone over USB with pymobiledevice3 (iOS 27+): screen frames, touches, buttons, apps.
+"""(Shared from ahq-device: change it there, never in a bot; its sync.py copies it in.)
+An iPhone over USB with pymobiledevice3 (iOS 27+): screen frames, touches, buttons, apps.
 
 One pymobiledevice3 ScreenStreamServer (the engine behind `pymobiledevice3 ...
 serve-web`) runs on our own asyncio thread and owns the phone's CoreDevice media
@@ -20,6 +21,10 @@ Linux/macOS or from an Administrator terminal on Windows) and the Developer Disk
 (`pymobiledevice3 mounter auto-mount --tunnel ''`). On the phone: Developer Mode
 and Settings > Developer > UI Automation. Coordinates are screen pixels of the
 decoded frame (750x1334 on an iPhone SE, 1206x2622 on an iPhone 17).
+
+The bot that vendors this file provides `log.py` (`log(tag, msg)`) and `debug.py`
+(`dbg(msg)`, `snap(kind, img, every_s, note)`) next to it. The WSBOT_* environment
+names are kept from the bot this came from, so existing setups keep working.
 """
 
 from __future__ import annotations
