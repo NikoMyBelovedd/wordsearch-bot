@@ -92,6 +92,13 @@ VARIANT_PAD = 24
 # Never sure we're still in the game: no board, no known game screen this long. Then the
 # bot stops tapping blind (on the iPhone home screen a blind tap opened Apple's Watch app).
 BLIND_TAP_WINDOW_S = 20.0
+# Blind clear taps only under the game's own overlays (tutorial boxes, toasts, dimming
+# popups): its top bar (back, star, coins) still shows through, dimmed. A full-screen ad
+# after a level has none of it, and a tap at the board centre there is an ad click.
+# TM_CCOEFF_NORMED ignores the dimming: a tutorial box over the board scored 0.69 against
+# the bare board, toasts 0.76, ads, home screens and level-end screens <= 0.15.
+CHROME_MIN = 0.5
+CHROME_REF_EVERY_S = 30.0  # how often the top bar is copied while the board is up
 # A known screen we only wait on (level complete, loading) that stays this long counts
 # as unknown: the game is stuck on it.
 WAIT_STUCK_S = 90.0
@@ -129,6 +136,29 @@ TRUST_LOG_EVERY_S = 600.0
 BANNER_EVERY_S = 0.3
 BANNER_LINGER_S = 0.8
 BANNER_PAD = 16  # calibration px around the banner's box
+
+
+def top_bar_box(zones: dict[str, tuple[int, int, int, int]]) -> tuple[int, int, int, int] | None:
+    """The game's top bar (back button to coins) in calibration space, from the no-tap
+    zones that cover its buttons."""
+    back, coins = zones.get("back_button"), zones.get("coins_and_shop")
+    if not back or not coins:
+        return None
+    return back[0], min(back[1], coins[1]), coins[2], max(back[3], coins[3])
+
+
+def top_bar(calib: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    """A small grey copy of the top bar, to compare frames with (chrome_score)."""
+    x1, y1, x2, y2 = (max(0, v) for v in box)
+    crop = cv2.cvtColor(calib[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+    return cv2.resize(crop, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA).astype(np.float32)
+
+
+def chrome_score(ref: np.ndarray, now: np.ndarray) -> float:
+    """How much `now` shows the same top bar as `ref` (1 = the same, dimmed or not)."""
+    if ref.shape != now.shape or ref.size == 0 or float(now.std()) < 1.0:
+        return 0.0
+    return float(cv2.matchTemplate(now, ref, cv2.TM_CCOEFF_NORMED)[0, 0])
 
 
 def board_visible_in(shot: Shot, expected: tuple[int, int, int, int] | None) -> bool:
@@ -513,6 +543,8 @@ class PopupWatcher(threading.Thread):
         self._eye_on = self._eye is not None and hasattr(device, "peek")
         self._eye_last: tuple[np.ndarray, tuple[float, tuple[int, int]]] | None = None
         self.board_visible = False
+        # The top bar as it looked with the board up: (its box, its picture, when)
+        self._chrome_ref: tuple[tuple[int, int, int, int], np.ndarray, float] | None = None
         # Set by the main thread while it solves a level. Then "board visible" is just
         # "the white panel is still exactly there": cheap, and unlike a full grid read
         # it isn't fooled by letters flying off after a word is found.
@@ -658,6 +690,23 @@ class PopupWatcher(threading.Thread):
         now = time.monotonic()
         return now - self.last_known < BLIND_TAP_WINDOW_S and now - self.system_seen > 3.0
 
+    def _keep_chrome(self, shot: Shot, now: float) -> None:
+        box = top_bar_box(getattr(self.device, "zones", {}))
+        if box is not None:
+            self._chrome_ref = (box, top_bar(shot.calib, box), now)
+
+    def game_chrome(self, shot: Shot) -> bool:
+        """The game's own top bar is on screen (dimmed or not): what's up is one of the
+        game's overlays, not a full-screen ad. True until the board was seen once."""
+        ref = self._chrome_ref
+        if ref is None:
+            return True  # nothing to compare with yet (the first launch)
+        box = top_bar_box(getattr(self.device, "zones", {}))
+        if box != ref[0]:
+            self._chrome_ref = None  # the zones moved (a tall iPhone's bar located)
+            return True
+        return chrome_score(ref[1], top_bar(shot.calib, box)) >= CHROME_MIN
+
     def _tick(self) -> None:
         t0 = time.monotonic()
         shot = self.device.shot()
@@ -691,6 +740,10 @@ class PopupWatcher(threading.Thread):
         if self.board_visible:
             self.last_known = now
             self._tap_run = None
+            if fresh and (
+                self._chrome_ref is None or now - self._chrome_ref[2] >= CHROME_REF_EVERY_S
+            ):
+                self._keep_chrome(shot, now)
         if matched or self.board_visible or alert:
             self._hidden_since = None
         else:

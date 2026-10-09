@@ -42,6 +42,23 @@ REPORT_BUDGET = 14_000_000  # bytes: under Discord's 15 MB upload limit with roo
 LOG_SHARE = 0.45  # at most this much of the budget per big log (the tail is kept)
 
 
+LIB_LOGGERS = ("pymobiledevice3", "asyncio", "av", "urllib3")
+
+
+class _Format(logging.Formatter):
+    """Our lines as they are (they carry their own time and tag); libraries' lines with
+    time, level, thread and logger name."""
+
+    LIB = logging.Formatter(
+        "%(asctime)s [LIB %(levelname)s] [%(threadName)s] %(name)s: %(message)s"
+    )
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.name == _file_log.name:
+            return record.getMessage()
+        return self.LIB.format(record)
+
+
 def dbg(msg: str) -> None:
     """Detail for debug.log only (not the UI log)."""
     _file_log.debug(
@@ -63,26 +80,21 @@ def setup(root: Path) -> None:
     local.mkdir(exist_ok=True)
     (root / "diagnostics" / "debug").mkdir(parents=True, exist_ok=True)
 
+    # One handler for the file: two on the same debug.log rotated each other's files
+    # (on Windows the rename failed, so the log grew without limit). pymobiledevice3 (and
+    # asyncio) log at DEBUG into it too, with their own format.
     handler = logging.handlers.RotatingFileHandler(
         local / "debug.log", maxBytes=15_000_000, backupCount=2, encoding="utf-8"
     )
-    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.setFormatter(_Format())
+    handler.setLevel(logging.DEBUG)
     _file_log.handlers[:] = [handler]
     _file_log.setLevel(logging.DEBUG)
     _file_log.propagate = False
-
-    # pymobiledevice3 (and asyncio) at DEBUG into the same file, with their own format.
-    lib = logging.handlers.RotatingFileHandler(
-        local / "debug.log", maxBytes=15_000_000, backupCount=2, encoding="utf-8"
-    )
-    lib.setFormatter(
-        logging.Formatter("%(asctime)s [LIB %(levelname)s] [%(threadName)s] %(name)s: %(message)s")
-    )
-    lib.setLevel(logging.DEBUG)
-    for name in ("pymobiledevice3", "asyncio", "av", "urllib3"):
+    for name in LIB_LOGGERS:
         lg = logging.getLogger(name)
         lg.setLevel(logging.DEBUG)
-        lg.addHandler(lib)
+        lg.addHandler(handler)
 
     from .log import add_sticky_sink
 

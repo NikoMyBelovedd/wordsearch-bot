@@ -400,3 +400,25 @@ def test_reward_wheel_zone_stays_while_the_wheel_is_up(clock, tmp_path):
     run(w, clock, 4)
     w._zones_due(1600)
     assert phone.zones.get("get_reward_wheel") is not None
+
+
+def test_clear_taps_only_under_the_games_own_overlays():
+    # A blind clear tap lands at the board centre: fine under a tutorial box or a toast
+    # (the game's top bar still shows, dimmed), an ad click on a full-screen ad.
+    box = watcher_mod.top_bar_box(IOSGameDevice.zones)
+    ref = watcher_mod.top_bar(shot_of("board").calib, box)
+
+    def score(name: str) -> float:
+        return watcher_mod.chrome_score(ref, watcher_mod.top_bar(shot_of(name).calib, box))
+
+    for name in ("board_readable", "claim_bonus_tutorial", "toast_over_board", "keep_playing"):
+        assert score(name) >= watcher_mod.CHROME_MIN, name
+    for name in ("home", "app_switcher", "loading", "next_level_plain"):
+        assert score(name) < watcher_mod.CHROME_MIN, name
+    # A full-screen ad: nothing like the bar (a real one is just as unlike it).
+    ad = shot_of("board").native.copy()
+    ad[:] = cv2.GaussianBlur(
+        np.random.default_rng(1).integers(0, 255, ad.shape, np.uint8), (31, 31), 0
+    )
+    assert watcher_mod.chrome_score(ref, watcher_mod.top_bar(Shot(9, ad, CALIB).calib, box)) < 0.5
+    assert watcher_mod.chrome_score(ref, np.zeros_like(ref)) == 0.0  # a black screen

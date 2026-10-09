@@ -194,7 +194,7 @@ When it finishes without a red error, the bot is installed.
    Your phone should appear with the word `device` next to it. If it says `unauthorized`, look at the phone for the popup from step 3.
 5. **In the phone's settings, keep the screen awake while charging.** Search Settings for **"Stay awake"** (it's in Developer options) and turn it on.
 
-> The bot's layout is tuned on a 1080×2400 screen and adjusts itself to other sizes.
+> The bot's layout is tuned on a 1080×2400 screen. Other screens are scaled by their width (the game fits the width), so taller or shorter phones keep the same picture size and the top bar where it is.
 
 ### iPhone
 
