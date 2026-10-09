@@ -171,7 +171,6 @@ class Bot:
         self.stop_event = threading.Event()
         # Set while AutomationHQ has paused the bot (see control.py).
         self.pause_event = threading.Event()
-        self.pause_event = threading.Event()
         # Live state for the UI.
         self.grid: list[str] = []
         self.fired_cells: set[tuple[int, int]] = set()
