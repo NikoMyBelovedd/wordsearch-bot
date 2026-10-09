@@ -97,14 +97,18 @@ def test_no_blind_taps_when_not_sure_we_are_in_the_game():
     taps = []
     fake = SimpleNamespace(
         device=SimpleNamespace(tap=lambda *a, **k: taps.append(a), above_board=(1, 2)),
-        watcher=SimpleNamespace(blind_taps_ok=lambda: False),
+        watcher=SimpleNamespace(blind_taps_ok=lambda: False, game_chrome=lambda shot: True),
         board_center=(3, 4),
         clear_taps=0,
     )
-    Bot._clear_tap(fake)
+    Bot._clear_tap(fake, None)
     assert taps == []
     fake.watcher.blind_taps_ok = lambda: True
-    Bot._clear_tap(fake)
+    Bot._clear_tap(fake, None)
+    assert taps == [(3, 4)]
+    # The game's top bar gone (a full-screen ad after a level): no blind tap.
+    fake.watcher.game_chrome = lambda shot: False
+    Bot._clear_tap(fake, None)
     assert taps == [(3, 4)]
 
 

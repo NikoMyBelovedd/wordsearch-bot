@@ -50,6 +50,7 @@ from .instance import acquire as lock_phone
 from .letters import LetterReader
 from .log import log
 from .schedule import Pacer
+from .shot import Shot
 from .solver import DIRECTIONS, MIN_LEN, Dictionary, Hit
 from .watcher import PopupWatcher
 
@@ -254,7 +255,7 @@ class Bot:
                 now, hidden_since, last_clear, first_tap_s if last_clear == start else None
             ):
                 last_clear = now
-                self._clear_tap()
+                self._clear_tap(shot)
             if self.watcher.busy():
                 prev, why = None, "watcher is handling a popup"
                 continue
@@ -290,11 +291,16 @@ class Bot:
     # boxes sit right over it and only close on a tap outside them (the hint card area,
     # device.above_board).
 
-    def _clear_tap(self) -> None:
+    def _clear_tap(self, shot: Shot) -> None:
         if getattr(self.device, "game_missing", lambda: False)():
             return  # on the home screen a blind tap opens apps; the watcher relaunches
         if not self.watcher.blind_taps_ok():
             return  # not sure we're in the game any more (the watcher escalates)
+        if not self.watcher.game_chrome(shot):
+            # No top bar: a full-screen ad (or another app), not one of the game's
+            # overlays. A blind tap there is an ad click; the watcher escalates instead.
+            log("SAFETY", "no clear tap: the game's top bar isn't on screen (an ad?)")
+            return
         if self.clear_taps % 2 == 0:
             self.device.tap(*self.board_center, why="clear popup (board center)")
         else:
