@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+ANDROID_USER_ENV = "AHQ_ANDROID_USER"  # = device.USER_ENV (device.py loads cv2, so not imported)
 DEFAULT_SERIAL = "ios"  # the iPhone over USB; --serial picks an adb device
 EXIT_ALREADY_RUNNING = 3  # another bot already plays on this phone
 EXIT_GAVE_UP = 4  # stuck past every recovery (dead screen stream, lost the game): restart me
@@ -65,6 +66,12 @@ def main() -> None:
         "--serial",
         help="ADB serial, or ios / ios:UDID for an iPhone over USB (default: $WSBOT_SERIAL or ios)",
     )
+    p.add_argument(
+        "--android-user",
+        type=int,
+        help="Android user the game is installed in (work profile 10, Secure Folder 150); "
+        "default: $AHQ_ANDROID_USER, else the first user that has the game",
+    )
     p.add_argument("--headless", action="store_true", help="run without the TUI")
     p.add_argument(
         "--mode", choices=["play", "custom", "single"], default="play", help="--headless goal"
@@ -86,6 +93,8 @@ def main() -> None:
     )
     args = p.parse_args()
     serial = args.serial or os.environ.get("WSBOT_SERIAL") or DEFAULT_SERIAL
+    if args.android_user is not None:  # the Android device reads it from the environment
+        os.environ[ANDROID_USER_ENV] = str(args.android_user)
     if args.report:
         from .debug import make_report
 

@@ -383,6 +383,7 @@ uv run wsbot --headless --serial emulator-5554 --fast --levels 20
 | Flag | Meaning |
 |---|---|
 | `--serial` | Which device. An adb serial (from `adb devices`), or `ios` / `ios:<UDID>` for an iPhone. Default: the `WSBOT_SERIAL` environment variable, then `ios`. |
+| `--android-user` | Android only: the user the game is installed in (work profile 10, Samsung Secure Folder 150). Default: the `AHQ_ANDROID_USER` environment variable (AutomationHQ sets it), then the first user that has the game. |
 | `--headless` | No menu screens; just log to the terminal. |
 | `--mode play\|custom\|single` | The goal for `--headless` runs. |
 | `--per-day N` | Daily target for `--mode custom`. |

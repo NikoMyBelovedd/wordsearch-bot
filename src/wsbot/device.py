@@ -11,6 +11,7 @@ because there is no adb process to spawn per gesture.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
@@ -24,6 +25,10 @@ from .log import log
 from .shot import Shot
 
 CALIB_W, CALIB_H = 1080, 2400
+# The Android user the game is installed in (a work profile is 10, Samsung's Secure
+# Folder 150). AutomationHQ sets it when the game isn't in the main user; `--android-user`
+# sets it too. Without either the bot looks for the first user that has the game.
+USER_ENV = "AHQ_ANDROID_USER"
 U2_TIMEOUT_S = 2.5
 
 # Rectangles (x1, y1, x2, y2) in calibration space that must never receive input:
@@ -35,6 +40,19 @@ FORBIDDEN_ZONES: dict[str, tuple[int, int, int, int]] = {
     "star_bonus_jar": (165, 140, 280, 270),
     "coins_and_shop": (700, 140, 1050, 270),
 }
+
+
+def parse_users(listing: str) -> list[int]:
+    """User ids from `pm list users` (`UserInfo{10:Work profile:1030} running`), the
+    main user (0) first."""
+    return sorted({int(m) for m in re.findall(r"UserInfo\{(\d+):", listing)} | {0})
+
+
+def has_package(path_output: str) -> bool:
+    """`pm path` printed an apk: the package is installed for that user."""
+    return any(
+        line.startswith("package:") and line[8:].strip() for line in path_output.splitlines()
+    )
 
 
 class SafetyError(RuntimeError):
@@ -165,6 +183,7 @@ class Device(BaseDevice):
         self.shell = ShellInput(serial)
         self._u2_busy = threading.Event()
         self._u2_retry_at = 0.0
+        self._users: dict[str, int] = {}
         w, h = self.d.window_size()
         self.width, self.height = w, h
         self.sx, self.sy = w / CALIB_W, h / CALIB_H
@@ -251,11 +270,54 @@ class Device(BaseDevice):
         match = re.search(r" ([\w.]+)/", out.stdout.decode(errors="ignore"))
         return match.group(1) if match else ""
 
+    def android_user(self, package: str) -> int:
+        """The Android user `package` runs in: the one asked for, else the first
+        (main user first) that has it installed, else 0. Asked once per package."""
+        if package not in self._users:
+            self._users[package] = self._requested_user() or self._find_user(package)
+        return self._users[package]
+
+    @staticmethod
+    def _requested_user() -> int | None:
+        value = os.environ.get(USER_ENV, "").strip()
+        return int(value) if value.isdigit() else None
+
+    def _find_user(self, package: str) -> int:
+        try:
+            users = parse_users(self.adb("shell", "pm", "list", "users").stdout.decode())
+            for user in users:
+                out = self.adb("shell", "pm", "path", "--user", str(user), package)
+                if has_package(out.stdout.decode(errors="ignore")):
+                    return user
+        except (subprocess.SubprocessError, OSError):
+            pass
+        return 0
+
+    def _user_args(self, package: str) -> list[str]:
+        """`--user N` for another user's game; nothing for the main user."""
+        user = self.android_user(package)
+        return ["--user", str(user)] if user else []
+
     def app_start(self, package: str) -> None:
-        self.adb("shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
+        user = self.android_user(package)
+        if not user:  # the main user: what has always worked
+            self.adb(
+                "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"
+            )
+            return
+        # monkey only starts the main user's copy: start the launcher activity in the
+        # game's user.
+        resolved = self.adb(
+            "shell", "cmd", "package", "resolve-activity", "--brief", "--user", str(user), package
+        ).stdout.decode(errors="ignore")
+        component = resolved.strip().splitlines()[-1].strip() if resolved.strip() else ""
+        if not component.startswith(package + "/"):
+            log("ERROR", f"can't find {package}'s main screen in Android user {user}")
+            return
+        self.adb("shell", "am", "start", "--user", str(user), "-n", component)
 
     def app_stop(self, package: str) -> None:
-        self.adb("shell", "am", "force-stop", package)
+        self.adb("shell", "am", "force-stop", *self._user_args(package), package)
 
     def close(self) -> None:
         self.shell.close()
