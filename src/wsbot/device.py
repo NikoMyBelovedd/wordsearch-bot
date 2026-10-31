@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from .debug import snap
+from .hintbutton import find_hint
 from .imgio import imread
 from .log import log
 from .shot import Shot
@@ -248,6 +249,7 @@ class Device(BaseDevice):
         self._topbar: TopBar | None = None
         self._anchors: dict[str, tuple[int, int]] = {}  # "back", "star": calibration px
         self._anchor_icons = {n: imread(ICON_DIR / f"{n}.png") for n in ("back", "star", "cart")}
+        self._hint_icon = imread(ICON_DIR / "hint.png")
         self._last_anchor_try = 0.0
         self._topbar_missed = False
         log("DEVICE", f"connected {serial} {w}x{h} dry_run={dry_run}")
@@ -319,9 +321,12 @@ class Device(BaseDevice):
         self._anchors = {"back": bar.back, "star": bar.star}
         self.zones = topbar_zones(bar)
 
-    def anchor(self, name: str) -> tuple[int, int] | None:
+    def anchor(self, name: str, shot: Shot | None = None) -> tuple[int, int] | None:
         """A named tap point for popups.json "@name" tap points: the top bar's "back" or
-        "star". None until the top bar is found, so the entry doesn't tap."""
+        "star", or "hint", the FREE hint button found on `shot` (the frame the entry matched).
+        None when it isn't there, so the entry doesn't tap."""
+        if name == "hint":
+            return None if shot is None else find_hint(shot.calib, self._hint_icon)
         return self._anchors.get(name)
 
     def _u2_frame(self) -> np.ndarray | None:

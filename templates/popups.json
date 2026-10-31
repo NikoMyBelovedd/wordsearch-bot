@@ -117,10 +117,7 @@
     "file": "word_master.png",
     "threshold": 0.85,
     "cooldown": 2.0,
-    "tap_offset": [
-      246,
-      1444
-    ],
+    "tap_point": "@hint",
     "allow": "below_board"
   },
   {

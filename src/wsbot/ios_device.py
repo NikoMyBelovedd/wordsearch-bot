@@ -248,8 +248,9 @@ class IOSGameDevice(BaseDevice):
             f"zones {self.zones}",
         )
 
-    def anchor(self, name: str) -> tuple[int, int] | None:
-        """A named tap point for popups.json "@name" tap points (None = unknown)."""
+    def anchor(self, name: str, shot=None) -> tuple[int, int] | None:
+        """A named tap point for popups.json "@name" tap points (None = unknown). `shot` is
+        the frame the entry matched; no iPhone entry uses a per-frame anchor yet."""
         if name == "calendar" and self.last_panel is not None:
             x, y, _, h = self.last_panel
             return x + CALENDAR_DX, y + h + CALENDAR_DY

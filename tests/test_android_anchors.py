@@ -83,8 +83,8 @@ class FakeTaps:
         self.anchor_of = anchor_of
         self.taps: list = []
 
-    def anchor(self, name):
-        return self.anchor_of.anchor(name) if self.anchor_of else None
+    def anchor(self, name, shot=None):
+        return self.anchor_of.anchor(name, shot) if self.anchor_of else None
 
     def tap(self, x, y, *, why="", allow=None):
         self.taps.append(((x, y), allow))
@@ -93,7 +93,7 @@ class FakeTaps:
 
 def act(popups, device, center):
     watcher = watcher_mod.PopupWatcher.__new__(watcher_mod.PopupWatcher)
-    watcher.device = device
+    watcher.device, watcher.shot = device, None
     popup = next(p for p in popups if p.name == "tutorial_claim_bonus")
     watcher._act(popup, center)
     return device.taps
@@ -121,7 +121,9 @@ def test_the_star_is_not_at_the_old_fixed_point():
     assert not near(bar.star, OLD_TAP, 40)
 
 
-@pytest.mark.parametrize("size", [(720, 1600), (1080, 2400), (1440, 3200), (1080, 2340), (1440, 3088)])
+@pytest.mark.parametrize(
+    "size", [(720, 1600), (1080, 2400), (1440, 3200), (1080, 2340), (1440, 3088)]
+)
 def test_the_home_gear_is_not_a_top_bar(size):
     # The home screen's gear matched the back arrow (0.96) and the star template (0.45) at
     # the same spot: the star must sit well right of the back arrow to count.
