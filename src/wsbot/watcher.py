@@ -894,9 +894,10 @@ class PopupWatcher(threading.Thread):
         target = popup.tap_point or center
         if isinstance(target, str):
             anchor = getattr(self.device, "anchor", lambda _: None)(target.lstrip("@"))
-            if anchor is None:
-                log("WARN", f"{popup.name}: anchor {target} not known yet; tapping the match")
-            target = anchor or center
+            if anchor is None:  # not located on this phone yet: the match's centre is no guess
+                log("WARN", f"{popup.name}: {target} not located yet; not tapping blind")
+                return
+            target = anchor
         if popup.tap_offset is not None:
             target = (center[0] + popup.tap_offset[0], center[1] + popup.tap_offset[1])
         self.device.tap(*target, why=popup.name, allow=popup.allow)

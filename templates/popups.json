@@ -19,6 +19,17 @@
     "cooldown": 2.0
   },
   {
+    "name": "daily_wisdom_continue",
+    "file": "daily_wisdom_continue.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "allow": "below_board",
+    "scales": [
+      0.97,
+      1.03
+    ]
+  },
+  {
     "name": "back_to_level",
     "file": "back_to_level.png",
     "threshold": 0.85,
@@ -29,10 +40,7 @@
     "file": "tutorial_claim_bonus.png",
     "threshold": 0.85,
     "cooldown": 3.0,
-    "tap_point": [
-      216,
-      205
-    ],
+    "tap_point": "@star",
     "allow": "star_bonus_jar",
     "mid_level": true
   },

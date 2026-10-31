@@ -55,11 +55,6 @@ from .watcher import PopupWatcher
 
 PACKAGE = "in.playsimple.wordsearch"
 DUMP_EVERY_S = 300.0  # one dump of a kind this often: a stuck read saved one a second
-# Board gone this long after a pass = the level is over. 3 s, not 1.5: the bonus
-# "Claim" popup fades in over the board ~1 s before the watcher sees it, and 1.5 s
-# counted that as a level end. Free: the next board takes 5+ s to come anyway.
-HIDDEN_END_S = 3.0
-MID_LEVEL_HOLD_S = 3.0  # a mid-level popup seen this recently explains a hidden board
 STALE_PREVIOUS_S = 15.0  # "finished" board still up this long = it wasn't finished
 PROGRESS_CHECK_EVERY = 300  # exhaustive swipes between "is anything still being found?"
 # The game left alone this long (bot start, a break, the night) ignored every touch
@@ -773,45 +768,26 @@ class Bot:
         return [h for *_, h in sorted(out)]
 
     def _wait_level_end(self, grid: list[str], timeout: float) -> bool:
-        """True once the level has really ended.
+        """True once the level has really ended: the watcher saw a level-end button
+        (level_done), or a different grid read identically twice in a row.
 
-        One odd frame (a banner over the board, a misread glyph) must not count, or the
-        bot moves on while the level is unfinished and then waits forever for a "new"
-        board. So: the watcher saw a level-end button, or the board stayed hidden for
-        HIDDEN_END_S, or a different grid read identically twice in a row.
+        A hidden board is never the end by itself. A popup the watcher has no template
+        for (a "Daily Wisdom" card) covers the board just the same, and counting it as
+        the end moved on from a level that wasn't finished. The popup is the watcher's
+        to handle, and the board coming back resumes the level (see _ready_to_swipe).
         """
         deadline = time.monotonic() + timeout
-        hidden_since: float | None = None
         other: list[str] | None = None
-        # A board that went away just before the deadline still gets its HIDDEN_END_S:
-        # cutting that short started the exhaustive pass on the level-complete screen.
-        grace = deadline + HIDDEN_END_S + 1.0
-        while not self.stop_event.is_set() and (
-            time.monotonic() < deadline or (hidden_since is not None and time.monotonic() < grace)
-        ):
+        while not self.stop_event.is_set() and time.monotonic() < deadline:
             if self.watcher.level_done.is_set():
                 return True
             shot = self.watcher.latest_shot(newer_than=self.watcher.frame_time, timeout=1.0)
             if shot is None:
                 continue
-            now = time.monotonic()
             board = shot.board
-            if board is None and self.watcher.covering():
-                # The "already collected" toast cuts the board short for ~1.5 s: that
-                # counted fake "level done"s, then "the previous level is still on screen".
-                hidden_since = None
+            if board is None:  # hidden: a popup, a toast or a transition, not evidence
+                other = None
                 continue
-            if board is None and now - self.watcher.mid_level_seen < MID_LEVEL_HOLD_S:
-                # The bonus jar popup (opened by its tutorial) covers the whole board:
-                # that counted a fake "level done" mid-level.
-                hidden_since = None
-                continue
-            if board is None:
-                hidden_since = hidden_since or now
-                if now - hidden_since >= HIDDEN_END_S:
-                    return True
-                continue
-            hidden_since = None
             read = self.read_grid(board)
             if read is None or same_level(read, grid):
                 other = None
