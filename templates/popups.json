@@ -123,5 +123,27 @@
       0,
       -589
     ]
+  },
+  {
+    "name": "welcome_accept",
+    "file": "welcome_accept.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap_offset": [
+      0,
+      245
+    ]
+  },
+  {
+    "name": "home_play_level",
+    "file": "home_tab.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap_offset": [
+      0,
+      -357
+    ],
+    "off_board": true,
+    "start_level": true
   }
 ]
