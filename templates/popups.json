@@ -61,7 +61,10 @@
     "threshold": 0.85,
     "cooldown": 1.0,
     "blocking": false,
-    "covers": [-140, 140]
+    "covers": [
+      -140,
+      140
+    ]
   },
   {
     "name": "play_later",
@@ -76,5 +79,49 @@
     "cooldown": 1.5,
     "confirm": 8,
     "holdoff": 4.0
+  },
+  {
+    "name": "coach_burst",
+    "file": "coach_burst.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap_offset": [
+      0,
+      -240
+    ],
+    "then_back": true
+  },
+  {
+    "name": "coach_hint_free",
+    "file": "coach_hint.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap_offset": [
+      250,
+      529
+    ],
+    "allow": "below_board",
+    "then_back": true
+  },
+  {
+    "name": "word_master",
+    "file": "word_master.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "tap_offset": [
+      0,
+      -224
+    ],
+    "then_back": true
+  },
+  {
+    "name": "coach_arrow",
+    "file": "coach_arrow.png",
+    "threshold": 0.92,
+    "cooldown": 2.0,
+    "tap_offset": [
+      0,
+      -589
+    ]
   }
 ]

@@ -342,6 +342,16 @@ class Device(BaseDevice):
         self.taps += 1
         return True
 
+    def back(self, *, why: str = "") -> bool:
+        """The phone's Back key (not the game's on-screen back arrow, a forbidden zone)."""
+        log("TAP", f"BACK {why}".rstrip())
+        if self.dry_run:
+            return True
+        with self.input_lock:
+            self.shell.run("input keyevent KEYCODE_BACK")
+        self.taps += 1
+        return True
+
     def swipe(
         self, start: tuple[int, int], end: tuple[int, int], ms: int, *, why: str = ""
     ) -> bool:
