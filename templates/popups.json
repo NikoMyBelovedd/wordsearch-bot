@@ -114,7 +114,7 @@
   },
   {
     "name": "word_master",
-    "file": "word_master.png",
+    "file": "coach_use_hint.png",
     "threshold": 0.85,
     "cooldown": 2.0,
     "tap_point": "@hint",

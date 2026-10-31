@@ -171,3 +171,62 @@ def test_word_master_never_backs_out():
     popup = next(p for p in popups if p.name == "word_master")
     assert not popup.then_back and popup.allow == "below_board"
     assert popup.tap_point == "@hint" and popup.tap_offset is None
+
+
+# ---- the coach is read from its bubble text, not from a banner -----------------------
+#
+# The first word_master template was the category banner's text ("THINGS THAT FLY") in the
+# dimmed header. Template matching ignores brightness, so the same banner on a plain level
+# (level_banner_orange.jpg, run5: 0.94) matched the coach and the bot waited forever. The
+# template is now the coach bubble's own sentence, "Use the HINT to reveal the first letter
+# of a word!", which only the coach shows.
+
+ANDROID_FRAMES = sorted(p for p in ANDROID.glob("*.jpg") if p.name != "word_master.jpg") + sorted(
+    (ROOT / "tests" / "data" / "screens").glob("*.jpg")
+)
+
+
+def word_master_score(popups, img: np.ndarray) -> float:
+    shot = Shot(1, calibrated(img), CALIB)
+    entry = next(p for p in popups if p.name == "word_master")
+    found = watcher_mod.match(shot.small, entry, shot.coarse_as(entry.coarse_look))
+    return watcher_mod.match_variants(shot.small, entry, found)[0]
+
+
+@pytest.mark.parametrize("name,pad_top,pad_bottom,size", VARIANTS, ids=[v[0] for v in VARIANTS])
+def test_the_bubble_sentence_scores_high_on_each_coach_frame(
+    name, pad_top, pad_bottom, size, popups
+):
+    assert word_master_score(popups, phone_frame(pad_top, pad_bottom, size)) >= 0.95, name
+
+
+@pytest.mark.parametrize("path", ANDROID_FRAMES, ids=[p.name for p in ANDROID_FRAMES])
+def test_no_normal_frame_reads_as_the_coach(path, popups):
+    """Plain levels (banner, board, card), the other coach, the home screen and popups:
+    none shows the bubble sentence, so none may match word_master."""
+    score = word_master_score(popups, cv2.imread(str(path)))
+    assert score < 0.6, (path.name, round(score, 3))
+
+
+def recoloured_banner(img: np.ndarray, hue: int | None) -> np.ndarray:
+    """The level's category banner (y 420-500) in another colour: hue 0-179 (OpenCV), or
+    None for white. Its text stays as it is: the banner text alone must not match."""
+    out = img.copy()
+    band = out[418:502, 30:1050]
+    hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
+    if hue is None:
+        hsv[..., 1] = 0
+        hsv[..., 2] = np.where(hsv[..., 2] < 90, hsv[..., 2], 255)
+    else:
+        hsv[..., 0] = hue
+        hsv[..., 1] = np.maximum(hsv[..., 1], 170)
+    out[418:502, 30:1050] = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    return out
+
+
+@pytest.mark.parametrize("hue", [0, 25, 60, 100, 130, 150, None], ids=lambda h: f"hue{h}")
+def test_the_banner_in_other_colours_never_reads_as_the_coach(hue, popups):
+    level = cv2.imread(str(ANDROID / "level_banner_orange.jpg"))
+    score = word_master_score(popups, recoloured_banner(level, hue))
+    assert score < 0.6, (hue, round(score, 3))
+    assert word_master_score(popups, level) < 0.6

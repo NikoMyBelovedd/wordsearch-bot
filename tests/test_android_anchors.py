@@ -14,6 +14,8 @@ level_board.jpg (a plain level, the bar in full view).
 
 from __future__ import annotations
 
+import collections
+import threading
 from pathlib import Path
 
 import cv2
@@ -220,3 +222,104 @@ def test_no_other_android_frame_matches_daily_wisdom(popups):
         found = watcher_mod.match(shot.small, entry, shot.coarse_as(entry.coarse_look))
         score = watcher_mod.match_variants(shot.small, entry, found)[0]
         assert score < entry.threshold, (path.name, round(score, 3))
+
+
+# ---- an anchor that never shows drops its entry; the bot plays on ---------------------
+#
+# run5: the coach's "@hint" never showed on a plain level (its header matched) and the
+# bot looped every 2 s on "not located yet" for 80 s. Now the look is counted: after
+# ANCHOR_LOOKS looks the entry is dropped for ANCHOR_DROP_S, logged once, for any entry
+# whose tap point is an anchor (word_master "@hint", tutorial_claim_bonus "@star").
+
+
+class Anchored:
+    """A watcher's device whose anchors come and go: `point` None = not on the frame."""
+
+    def __init__(self, point=None):
+        self.point = point
+        self.taps: list = []
+
+    def anchor(self, name, shot=None):
+        return self.point
+
+    def tap(self, x, y, *, why="", allow=None):
+        self.taps.append(((x, y), allow))
+        return True
+
+
+def looking_watcher(popup, device, score=0.94, center=(540, 1000)):
+    """A PopupWatcher with only the state _handle_popups reads, and `popup` on screen."""
+    watcher = watcher_mod.PopupWatcher.__new__(watcher_mod.PopupWatcher)
+    watcher.device, watcher.shot = device, None
+    watcher._looked = [popup]
+    watcher._scores = {popup.name: (score, center)}
+    watcher.board_visible, watcher.expected_panel, watcher.fps = False, None, 0.0
+    watcher.resting, watcher.idle = threading.Event(), threading.Event()
+    watcher._eye_on, watcher._last_score_log = False, 0.0
+    watcher._group_hit, watcher._last_tap = {}, -1e9
+    watcher._tap_run, watcher._tap_run_told = None, False
+    watcher.last_match, watcher.last_action, watcher.last_known = 0.0, 0.0, 0.0
+    watcher.system_seen, watcher.mid_level_seen = 0.0, 0.0
+    watcher.hits, watcher.level_done = collections.Counter(), threading.Event()
+    return watcher
+
+
+@pytest.fixture
+def warnings(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(watcher_mod, "log", lambda kind, msg: seen.append(f"{kind} {msg}"))
+    return seen
+
+
+ANCHOR_ENTRIES = ["word_master", "tutorial_claim_bonus"]  # "@hint" and "@star"
+
+
+@pytest.mark.parametrize("entry", ANCHOR_ENTRIES)
+def test_an_anchor_never_on_the_frame_drops_the_entry_after_three_looks(entry, warnings):
+    popups = watcher_mod.load_popups(ROOT / "templates")
+    popup = next(p for p in popups if p.name == entry)
+    device = Anchored(None)
+    watcher = looking_watcher(popup, device)
+    step = popup.cooldown + 0.5
+    for k in range(watcher_mod.ANCHOR_LOOKS):
+        assert watcher._handle_popups(100.0 + k * step) is True
+    assert device.taps == []  # never blind
+    assert popup.dropped_until == pytest.approx(100.0 + 2 * step + watcher_mod.ANCHOR_DROP_S)
+    dropped = [w for w in warnings if "dropping it" in w]
+    assert len(dropped) == 1 and entry in dropped[0], warnings
+
+    # while dropped the screen is not a popup: the bot plays on, and nothing is logged again
+    count = len(warnings)
+    assert watcher._handle_popups(popup.dropped_until - 1.0) is False
+    assert device.taps == [] and len(warnings) == count
+
+
+@pytest.mark.parametrize("entry", ANCHOR_ENTRIES)
+def test_a_dropped_entry_that_still_matches_gets_its_looks_again_not_a_tap(entry, warnings):
+    popups = watcher_mod.load_popups(ROOT / "templates")
+    popup = next(p for p in popups if p.name == entry)
+    device = Anchored(None)
+    watcher = looking_watcher(popup, device)
+    step = popup.cooldown + 0.5
+    for k in range(watcher_mod.ANCHOR_LOOKS):
+        watcher._handle_popups(100.0 + k * step)
+    back = popup.dropped_until
+    assert watcher._handle_popups(back + 0.1) is True  # the cool-down is over: a new look
+    assert popup.unlocated == 1 and device.taps == []
+    assert len([w for w in warnings if "dropping it" in w]) == 1  # the same screen: no new log
+
+
+@pytest.mark.parametrize("entry", ANCHOR_ENTRIES)
+def test_the_anchor_found_in_time_taps_and_resets_the_count(entry, warnings):
+    popups = watcher_mod.load_popups(ROOT / "templates")
+    popup = next(p for p in popups if p.name == entry)
+    device = Anchored(None)
+    watcher = looking_watcher(popup, device)
+    watcher._handle_popups(100.0)
+    watcher._handle_popups(100.0 + popup.cooldown + 0.5)
+    assert popup.unlocated == 2 and device.taps == []
+    device.point = (222, 333)  # the anchor shows up before the third look
+    watcher._handle_popups(100.0 + 2 * (popup.cooldown + 0.5))
+    assert device.taps == [((222, 333), popup.allow)]
+    assert popup.unlocated == 0 and popup.dropped_until == 0.0
+    assert not [w for w in warnings if "dropping it" in w]
