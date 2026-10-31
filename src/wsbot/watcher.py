@@ -48,6 +48,8 @@ GRAY_MIN_STD = 32.0
 # that matters (a popup, a dimmed board, a moving button) by far more.
 CHANGE_LEVEL = 12
 UNKNOWN_AFTER_S = 8.0  # board hidden and nothing matched this long -> unknown overlay
+# An entry must be gone this long before its taps are forgotten (a flicker is not a new screen)
+GONE_AFTER_S = 1.5
 APP_CHECK_EVERY_S = 5.0
 ACTION_SETTLE_S = 1.0  # after tapping a popup, give it this long to disappear
 # A toast last seen this recently may still be up. The watcher looks only ~2x a second,
@@ -184,6 +186,13 @@ class Popup:
     # avoid zone as (left, top, right, bottom) px from the match center, instead of avoid_pad
     avoid_box: tuple[int, int, int, int] | None = None
     seen_since: float = 0.0  # when this entry started matching (0 = not matching)
+    # tap this offset from the match center instead (a target found relative to the template)
+    tap_offset: tuple[int, int] | None = None
+    # the first action is the tap; if it is still up on the next try, press Back; then stop
+    then_back: bool = False
+    appearance_taps: int = 0  # actions taken since it last appeared
+    last_kind: str = ""  # "tap" or "back": the last action (logged when it goes)
+    last_seen: float = 0.0
     coarse: np.ndarray | None = None  # quarter-res template for match()'s first look
     coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
@@ -278,6 +287,8 @@ def load_popups(folder: Path) -> list[Popup]:
                 system=e.get("system", False),
                 off_board=e.get("off_board", False),
                 avoid_box=tuple(e["avoid_box"]) if "avoid_box" in e else None,
+                tap_offset=tuple(e["tap_offset"]) if "tap_offset" in e else None,
+                then_back=e.get("then_back", False),
             )
         )
     log("WATCHER", f"loaded {len(popups)} popup templates")
@@ -790,11 +801,13 @@ class PopupWatcher(threading.Thread):
             if score >= popup.threshold:
                 popup.streak += 1
                 popup.seen_since = popup.seen_since or now
+                popup.last_seen = now
                 if hit is None:
                     hit = (popup, score, center)
             else:
                 popup.streak = 0
                 popup.seen_since = 0.0
+                self._forget_taps(popup, now)
         if now - self._last_score_log > 1.0:
             self._last_score_log = now
             top = sorted(scores, reverse=True)[:4]
@@ -843,14 +856,44 @@ class PopupWatcher(threading.Thread):
             self._last_tap = now
             if self._tap_run is None or self._tap_run[0] != popup.name:
                 self._tap_run, self._tap_run_told = (popup.name, now), False
-            target = popup.tap_point or center
-            if isinstance(target, str):
-                anchor = getattr(self.device, "anchor", lambda _: None)(target.lstrip("@"))
-                if anchor is None:
-                    log("WARN", f"{popup.name}: anchor {target} not known yet; tapping the match")
-                target = anchor or center
-            self.device.tap(*target, why=popup.name, allow=popup.allow)
+            self._act(popup, center)
         return True
+
+    def _act(self, popup: Popup, center: tuple[int, int]) -> None:
+        """Do the entry's action. A then_back entry taps its target first, presses Back
+        if it is still up on the next try, and then leaves it alone: a coach bubble that
+        survives both never gets a third tap that could spend coins."""
+        n = popup.appearance_taps
+        if popup.then_back:
+            if n >= 2:
+                return
+            popup.appearance_taps = n + 1
+        back = getattr(self.device, "back", None)
+        if popup.then_back and n == 1 and back is not None:
+            popup.last_kind = "back"
+            log("WATCHER", f"{popup.name} still up after its tap: pressing Back")
+            back(why=popup.name)
+            return
+        popup.last_kind = "tap"
+        target = popup.tap_point or center
+        if isinstance(target, str):
+            anchor = getattr(self.device, "anchor", lambda _: None)(target.lstrip("@"))
+            if anchor is None:
+                log("WARN", f"{popup.name}: anchor {target} not known yet; tapping the match")
+            target = anchor or center
+        if popup.tap_offset is not None:
+            target = (center[0] + popup.tap_offset[0], center[1] + popup.tap_offset[1])
+        self.device.tap(*target, why=popup.name, allow=popup.allow)
+
+    def _forget_taps(self, popup: Popup, now: float) -> None:
+        """The entry has been gone a while: log which action it last took, and start over."""
+        if popup.appearance_taps and now - popup.last_seen > GONE_AFTER_S:
+            log(
+                "WATCHER",
+                f"{popup.name} gone after {popup.appearance_taps} action(s), "
+                f"last {popup.last_kind}",
+            )
+            popup.appearance_taps = 0
 
     def _tapped_in_vain(self, popup: Popup, now: float) -> bool:
         """Has this button been tapped for TAP_STUCK_S with no board in between? Then
