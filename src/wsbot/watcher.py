@@ -1088,6 +1088,9 @@ class PopupWatcher(threading.Thread):
 
     def _zones_due(self, y: int | None) -> None:
         """Runs just before an input is checked against the no-tap zones."""
+        # The booster-row zone holds only while a level's board is on screen. A stale
+        # below_board_y refused the home screen's Play Level tap for minutes (run4).
+        self.device.board_in_view = self.board_visible and self.expected_panel is not None
         # The bot's first swipes on a new board can come before the next tick drops
         # an off-board popup's zone (see _handle_popups).
         if self.board_visible and self.expected_panel is not None:

@@ -162,6 +162,9 @@ class BaseDevice:
     swipe_ms = 60  # fast-pass finger travel time
     dry_run = False
     below_board_y: int | None = None
+    # The watcher's latest look has a level board on screen (set in _zones_due). Without a
+    # watcher the zone holds as before.
+    board_in_view = True
     last_panel: tuple[int, int, int, int] | None = None  # board of the latest level
     refused = 0
 
@@ -187,7 +190,7 @@ class BaseDevice:
         self.sync_zones(y)
         zones = dict(self.zones)
         zones.update(self.__dict__.get("dynamic_zones", {}))
-        if self.below_board_y is not None:
+        if self.below_board_y is not None and self.board_in_view:
             zones["below_board"] = (0, self.below_board_y, *self.calib)
         for name, (x1, y1, x2, y2) in zones.items():
             if name != allow and x1 <= x <= x2 and y1 <= y <= y2:

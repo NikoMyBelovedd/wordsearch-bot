@@ -21,6 +21,7 @@ PARTIAL_LOG = 0.6  # a weaker match is logged as "not sure", so a miss can be to
 SEARCH_LEFT = 0.45  # back and star are searched in the left part of the top quarter
 SEARCH_RIGHT = 0.55  # the cart in the right part (from here on)
 ROW_TOLERANCE = 0.03  # the icons sit on one row: within this share of the frame's width
+SEPARATION = 0.08  # the star sits this far right of the back arrow (home: the gear matched both)
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ def locate(frame: np.ndarray, icons: dict[str, np.ndarray]) -> tuple[TopBar | No
     row = ROW_TOLERANCE * w
     if min(sb, ss) < MIN_SCORE or not (back[0] < 0.3 * w and 0.1 * w < star[0] < 0.45 * w):
         return None, note
-    if abs(back[1] - star[1]) > row or star[0] <= back[0]:
+    if abs(back[1] - star[1]) > row or star[0] - back[0] < SEPARATION * w:
         return None, note
     if sc < MIN_SCORE or abs(cart[1] - back[1]) > row or cart[0] < 0.6 * w:
         cart = None

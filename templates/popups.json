@@ -67,7 +67,8 @@
     "name": "already_collected",
     "file": "already_collected.png",
     "threshold": 0.85,
-    "cooldown": 1.0,
+    "cooldown": 3.0,
+    "tap": false,
     "blocking": false,
     "covers": [
       -140,
@@ -117,10 +118,10 @@
     "threshold": 0.85,
     "cooldown": 2.0,
     "tap_offset": [
-      0,
-      -224
+      246,
+      1444
     ],
-    "then_back": true
+    "allow": "below_board"
   },
   {
     "name": "coach_arrow",

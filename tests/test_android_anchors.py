@@ -121,6 +121,15 @@ def test_the_star_is_not_at_the_old_fixed_point():
     assert not near(bar.star, OLD_TAP, 40)
 
 
+@pytest.mark.parametrize("size", [(720, 1600), (1080, 2400), (1440, 3200), (1080, 2340), (1440, 3088)])
+def test_the_home_gear_is_not_a_top_bar(size):
+    # The home screen's gear matched the back arrow (0.96) and the star template (0.45) at
+    # the same spot: the star must sit well right of the back arrow to count.
+    frame = Shot(1, load("home_play_level.jpg", size), CALIB).calib
+    bar, note = locate(frame, ICONS)
+    assert bar is None, (size, note)
+
+
 def test_no_top_bar_on_a_dimmed_card():
     bar, _ = locate(load("daily_wisdom.jpg"), ICONS)
     assert bar is None
@@ -174,6 +183,12 @@ def test_the_banner_taps_the_detected_star(popups, device):
     assert len(taps) == 1
     (x, y), allow = taps[0]
     assert near((x, y), STAR) and allow == "star_bonus_jar"
+
+
+def test_already_collected_is_a_passive_cooled_cover(popups):
+    # The toast is not a button: tapping it did nothing and the bot re-fired ~20 taps.
+    popup = next(p for p in popups if p.name == "already_collected")
+    assert popup.tap is False and popup.covers and popup.cooldown >= 3.0
 
 
 def test_the_banner_does_not_tap_blind_before_the_star_is_found(popups):

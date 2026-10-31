@@ -7,7 +7,8 @@ What each one does (tap targets are in calibration px, 1080x2400):
 - coach_hint_free: "Use the HINT ..." (level 4). Taps the FREE hint button the arrow points at.
 - coach_burst: "The BURST HINT ..." (level 11). Never taps the 200-coin burst button; taps the
   dimmed board above the bubble, then presses Back if it is still there.
-- word_master: the reward ladder. Taps the dim backdrop above the popup (no close X), then Back.
+- word_master: the "Use the HINT" bubble its header match finds (word_master.jpg). Taps the FREE
+  hint its arrow points at; never Back (Back exits the level).
 - coach_arrow: any other dimmed coach with an arrow (its template is the burst arrow). Taps the
   backdrop only.
 """
@@ -36,7 +37,7 @@ BURST_BUTTON = (636, 1908)  # the 200-coin burst button, level 11: must never be
 CASES = {
     "coach_hint_free.jpg": ("coach_hint_free", FREE_HINT),
     "coach_burst.jpg": ("coach_burst", None),
-    "word_master.jpg": ("word_master", None),
+    "word_master.jpg": ("word_master", FREE_HINT),
 }
 
 
@@ -168,3 +169,11 @@ def test_the_log_forgets_taps_only_after_the_entry_is_gone(popups):
     popup.last_seen = 1.0
     watcher._forget_taps(popup, 5.0)  # gone for a while: a new appearance starts over
     assert popup.appearance_taps == 0
+
+
+def test_word_master_taps_the_free_hint_and_never_backs_out(popups):
+    popup = next(p for p in popups if p.name == "word_master")
+    assert not popup.then_back and popup.allow == "below_board"
+    popup_hit, _, center = top(popups, load("word_master.jpg"))
+    target = target_of(popup_hit, center)
+    assert abs(target[0] - FREE_HINT[0]) <= 8 and abs(target[1] - FREE_HINT[1]) <= 8, target
