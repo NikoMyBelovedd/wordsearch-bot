@@ -131,6 +131,11 @@ TRUST_LOG_EVERY_S = 600.0
 BANNER_EVERY_S = 0.3
 BANNER_LINGER_S = 0.8
 BANNER_PAD = 16  # calibration px around the banner's box
+# Android's own permission dialogs (the notification prompt a new install asks for on its
+# first start) come up in front of the game, in another app: answer "Don't allow" by its
+# resource id. Relaunching the game over them never closed them.
+PERMISSION_UI = "permissioncontroller"
+PERMISSION_DENY_ID = "com.android.permissioncontroller:id/permission_deny_button"
 
 
 def board_visible_in(shot: Shot, expected: tuple[int, int, int, int] | None) -> bool:
@@ -183,6 +188,9 @@ class Popup:
     # A whole screen of its own (level complete, home screen): never there while the
     # level's board is in view, so full scans then skip it (~2.5 ms each)
     off_board: bool = False
+    # Starts a level (the home screen's Play): never while the bot rests or sleeps between
+    # levels, so paced play keeps the game where it is
+    start_level: bool = False
     # avoid zone as (left, top, right, bottom) px from the match center, instead of avoid_pad
     avoid_box: tuple[int, int, int, int] | None = None
     seen_since: float = 0.0  # when this entry started matching (0 = not matching)
@@ -286,6 +294,7 @@ def load_popups(folder: Path) -> list[Popup]:
                 relaunch=e.get("relaunch", False),
                 system=e.get("system", False),
                 off_board=e.get("off_board", False),
+                start_level=e.get("start_level", False),
                 avoid_box=tuple(e["avoid_box"]) if "avoid_box" in e else None,
                 tap_offset=tuple(e["tap_offset"]) if "tap_offset" in e else None,
                 then_back=e.get("then_back", False),
@@ -713,7 +722,11 @@ class PopupWatcher(threading.Thread):
             log("WARN", f"slow watcher tick {took:.1f}s (screenshot {now - t0:.1f}s)")
 
         # The game gone: confirm it within ~2 s instead of ~10 (3 checks in a row).
-        every = 1.0 if getattr(self.device, "game_missing", lambda: False)() else APP_CHECK_EVERY_S
+        # Android: the board hidden means a dialog or the home screen may be in front.
+        hunting = getattr(self.device, "game_missing", lambda: False)() or (
+            not self.board_visible and getattr(self.device, "platform", "") == "android"
+        )
+        every = 1.0 if hunting else APP_CHECK_EVERY_S
         if now - self._last_app_check > every:
             self._last_app_check = now
             self._ensure_foreground()
@@ -786,6 +799,9 @@ class PopupWatcher(threading.Thread):
             self._drop_off_board_zones()
         for popup in self._looked:
             if on_board and popup.off_board:
+                popup.streak, popup.seen_since = 0, 0.0
+                continue
+            if popup.start_level and (self.resting.is_set() or self.idle.is_set()):
                 popup.streak, popup.seen_since = 0, 0.0
                 continue
             if system_only and not (popup.system or popup.avoid):
@@ -1302,7 +1318,20 @@ class PopupWatcher(threading.Thread):
 
     def _ensure_foreground(self) -> None:
         pkg = self.device.foreground()
+        if pkg and PERMISSION_UI in pkg:
+            self._answer_permission_prompt(pkg)
+            return
         if pkg and pkg != self.package:
             log("RECOVERY", f"foreground is {pkg}, relaunching {self.package}")
             if not self.device.dry_run:
                 self.device.app_start(self.package)
+
+    def _answer_permission_prompt(self, pkg: str) -> None:
+        """A permission dialog is in front (Android's notification prompt on a new install):
+        tap "Don't allow" by its resource id, found in the view dump. Never a relaunch: the
+        game restarted under the dialog and it stayed up for minutes."""
+        find = getattr(self.device, "find_view", None)
+        point = find(PERMISSION_DENY_ID) if find is not None else None
+        if point is None:
+            return  # not on screen yet (or the dump came back late): look again next time
+        self.device.tap(*point, why=f"{pkg}: Don't allow")

@@ -16,6 +16,7 @@ import re
 import subprocess
 import threading
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
 import cv2
@@ -46,6 +47,23 @@ def parse_users(listing: str) -> list[int]:
     """User ids from `pm list users` (`UserInfo{10:Work profile:1030} running`), the
     main user (0) first."""
     return sorted({int(m) for m in re.findall(r"UserInfo\{(\d+):", listing)} | {0})
+
+
+BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def view_center(xml: str, resource_id: str) -> tuple[int, int] | None:
+    """Centre (device px) of the first view with this resource id in a uiautomator dump."""
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return None
+    for node in root.iter("node"):
+        bounds = BOUNDS.fullmatch(node.get("bounds") or "")
+        if node.get("resource-id") == resource_id and bounds:
+            left, top, right, bottom = map(int, bounds.groups())
+            return (left + right) // 2, (top + bottom) // 2
+    return None
 
 
 def has_package(path_output: str) -> bool:
@@ -183,6 +201,7 @@ class Device(BaseDevice):
         self.shell = ShellInput(serial)
         self._u2_busy = threading.Event()
         self._u2_retry_at = 0.0
+        self._dump_busy = threading.Event()
         self._users: dict[str, int] = {}
         w, h = self.d.window_size()
         self.width, self.height = w, h
@@ -269,6 +288,37 @@ class Device(BaseDevice):
         out = self.adb("shell", "dumpsys activity activities | grep -m1 topResumedActivity")
         match = re.search(r" ([\w.]+)/", out.stdout.decode(errors="ignore"))
         return match.group(1) if match else ""
+
+    def dump_ui(self) -> str | None:
+        """The screen's view tree (uiautomator2's XML), or None if it isn't back in time.
+        Under a guard thread like the frames: a stuck u2 call must not stall the watcher."""
+        if self._dump_busy.is_set():
+            return None
+        box: list[str] = []
+
+        def grab() -> None:
+            try:
+                box.append(self.d.dump_hierarchy())
+            except Exception as exc:
+                log("WARN", f"ui dump failed: {exc!r}")
+            finally:
+                self._dump_busy.clear()
+
+        self._dump_busy.set()
+        worker = threading.Thread(target=grab, daemon=True, name="u2-dump")
+        worker.start()
+        worker.join(U2_TIMEOUT_S)
+        if worker.is_alive():
+            log("WARN", f"ui dump stuck >{U2_TIMEOUT_S}s")
+        return box[0] if box else None
+
+    def find_view(self, resource_id: str) -> tuple[int, int] | None:
+        """Centre of the on-screen view with this resource id, in calibration px."""
+        xml = self.dump_ui()
+        center = view_center(xml, resource_id) if xml else None
+        if center is None:
+            return None
+        return round(center[0] / self.sx), round(center[1] / self.sy)
 
     def android_user(self, package: str) -> int:
         """The Android user `package` runs in: the one asked for, else the first
