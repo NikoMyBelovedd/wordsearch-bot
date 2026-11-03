@@ -4,7 +4,29 @@
     "file": "next_level.png",
     "threshold": 0.85,
     "cooldown": 2.0,
-    "level_done": true
+    "level_done": true,
+    "allow": "below_board",
+    "group": "next_level",
+    "off_board": true
+  },
+  {
+    "name": "next_level_text",
+    "file": "next_level_text.png",
+    "threshold": 0.85,
+    "cooldown": 2.0,
+    "level_done": true,
+    "allow": "below_board",
+    "group": "next_level",
+    "off_board": true,
+    "scales": [
+      0.75,
+      0.84,
+      0.92,
+      0.97,
+      1.035,
+      1.07,
+      1.1
+    ]
   },
   {
     "name": "collect",
