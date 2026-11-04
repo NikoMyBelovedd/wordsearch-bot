@@ -48,7 +48,7 @@ PULSED = {"next_level_twister_pulsed", "next_level_wheel_pulsed"}
 BOARD = "board_level_23"  # a level in play: the board in view
 OTHER_SCREENS = [
     BOARD,
-    "other_daily_wisdom",  # Daily Wisdom: a green Continue button
+    "daily_wisdom_3",  # Daily Wisdom: a green Continue button
     "coach_hint_free",
     "coach_burst",
     "word_master",

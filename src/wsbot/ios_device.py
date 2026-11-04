@@ -32,6 +32,7 @@ from .device import BaseDevice, SafetyError
 from .imgio import imread
 from .log import log
 from .shot import Shot
+from .topbar import icon_mask as _icon_mask
 
 K = 1.728  # iPhone SE px -> calibration px
 GAME = "in.playsimple.wordsearch"
@@ -99,12 +100,6 @@ def model_name(product_type: str) -> str:
 def _box(x1: float, y1: float, x2: float, y2: float) -> tuple[int, int, int, int]:
     """iPhone SE px rectangle -> calibration space."""
     return round(x1 * K), round(y1 * K), round(x2 * K), round(y2 * K)
-
-
-def _icon_mask(img: np.ndarray) -> np.ndarray:
-    """White, unsaturated pixels (button icons) as a 0/255 mask."""
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    return (((hsv[..., 2] > 200) & (hsv[..., 1] < 70)) * 255).astype(np.uint8)
 
 
 class IOSGameDevice(BaseDevice):
@@ -253,8 +248,9 @@ class IOSGameDevice(BaseDevice):
             f"zones {self.zones}",
         )
 
-    def anchor(self, name: str) -> tuple[int, int] | None:
-        """A named tap point for popups.json "@name" tap points (None = unknown)."""
+    def anchor(self, name: str, shot=None) -> tuple[int, int] | None:
+        """A named tap point for popups.json "@name" tap points (None = unknown). `shot` is
+        the frame the entry matched; no iPhone entry uses a per-frame anchor yet."""
         if name == "calendar" and self.last_panel is not None:
             x, y, _, h = self.last_panel
             return x + CALENDAR_DX, y + h + CALENDAR_DY
