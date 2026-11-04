@@ -7,7 +7,9 @@ What each one does (tap targets are in calibration px, 1080x2400):
 - coach_hint_free: "Use the HINT ..." (level 4). Taps the FREE hint button the arrow points at.
 - coach_burst: "The BURST HINT ..." (level 11). Never taps the 200-coin burst button; taps the
   dimmed board above the bubble, then presses Back if it is still there.
-- word_master: the reward ladder. Taps the dim backdrop above the popup (no close X), then Back.
+- word_master: the "Use the HINT" bubble its header match finds (word_master.jpg). Taps the FREE
+  hint button, found on the frame ("@hint", see test_android_hint.py); never Back (Back exits
+  the level).
 - coach_arrow: any other dimmed coach with an arrow (its template is the burst arrow). Taps the
   backdrop only.
 """
@@ -22,6 +24,7 @@ import pytest
 
 from wsbot import watcher as watcher_mod
 from wsbot.device import FORBIDDEN_ZONES
+from wsbot.hintbutton import find_hint
 from wsbot.shot import Shot
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,13 +33,14 @@ SCREENS = ROOT / "tests" / "data" / "screens"
 ALERTS = ROOT / "tests" / "data" / "alerts"
 CALIB = (1080, 2400)
 FREE_HINT = (798, 1908)  # the FREE hint button, level 4
+HINT_ICON = cv2.imread(str(ROOT / "templates" / "anchors" / "hint.png"))
 BURST_BUTTON = (636, 1908)  # the 200-coin burst button, level 11: must never be tapped
 
 # fixture -> (entry that owns it, how far its tap may be from the expected point)
 CASES = {
     "coach_hint_free.jpg": ("coach_hint_free", FREE_HINT),
     "coach_burst.jpg": ("coach_burst", None),
-    "word_master.jpg": ("word_master", None),
+    "word_master.jpg": ("word_master", FREE_HINT),
 }
 
 
@@ -53,8 +57,11 @@ def scores_of(popups, shot: Shot) -> dict:
     return out
 
 
-def target_of(popup, center):
-    """Where the watcher taps for an entry that owns the frame (see PopupWatcher._act)."""
+def target_of(popup, center, frame):
+    """Where the watcher taps for an entry that owns the frame (see PopupWatcher._act):
+    the "@hint" disc found on the frame, or the match's centre plus the entry's offset."""
+    if popup.tap_point == "@hint":
+        return find_hint(frame, HINT_ICON)
     dx, dy = popup.tap_offset
     return center[0] + dx, center[1] + dy
 
@@ -86,7 +93,8 @@ def test_each_android_screen_maps_to_its_entry_and_tap(name, popups):
     assert hit is not None, name
     popup, score, center = hit
     assert popup.name == entry, (name, popup.name, score)
-    target = target_of(popup, center)
+    target = target_of(popup, center, load(name))
+    assert target is not None, name
     if expected is not None:
         assert abs(target[0] - expected[0]) <= 40 and abs(target[1] - expected[1]) <= 40, target
         assert popup.allow == "below_board"  # the FREE button sits in the booster row
@@ -101,7 +109,7 @@ def test_the_burst_coach_never_taps_the_burst_button(popups):
     hit = top(popups, load("coach_burst.jpg"))
     popup, _, center = hit
     assert popup.name == "coach_burst"
-    target = target_of(popup, center)
+    target = target_of(popup, center, load("coach_burst.jpg"))
     assert abs(target[0] - BURST_BUTTON[0]) > 150 or abs(target[1] - BURST_BUTTON[1]) > 150
 
 
@@ -121,7 +129,7 @@ def test_an_unknown_dimmed_coach_gets_the_outside_tap(popups):
     img[1350:1408, 330:680] = (255, 255, 250)
     hit = top(popups, img)
     assert hit is not None and hit[0].name == "coach_arrow", hit and hit[0].name
-    target = target_of(hit[0], hit[2])
+    target = target_of(hit[0], hit[2], img)
     assert target[1] < 1240 and not in_zone(target, FORBIDDEN_ZONES["coins_and_shop"])
     assert not hit[0].then_back  # tap-only: a Back press on a guess could leave the level
 

@@ -97,6 +97,12 @@ BLIND_TAP_WINDOW_S = 20.0
 # A known screen we only wait on (level complete, loading) that stays this long counts
 # as unknown: the game is stuck on it.
 WAIT_STUCK_S = 90.0
+# A tap target that is an anchor ("@hint", "@star") and isn't on the frame: the bot doesn't
+# tap blind, and after this many looks (one cooldown apart, ~6 s) the entry is dropped for
+# ANCHOR_DROP_S (logged once), so the bot plays on. A screen that still matches after the
+# drop gets the same looks again: it is not tapped and it does not hold the game up.
+ANCHOR_LOOKS = 3
+ANCHOR_DROP_S = 30.0
 # The same button tapped over and over this long with no board in between counts as
 # unknown too: the game isn't taking the taps (a Bonus "Claim" tapped 317 times in
 # 15 min until AutomationHQ restarted the bot). Normal play has tapped one button
@@ -205,6 +211,8 @@ class Popup:
     coarse_look: str = "gray"  # how `coarse` sees the frame (see shot.look)
     last_hit: float = 0.0
     streak: int = 0
+    unlocated: int = 0  # looks in a row whose "@anchor" tap point was not on the frame
+    dropped_until: float = 0.0  # ignored until then: its tap point never showed (see _act)
 
 
 @dataclass
@@ -801,6 +809,9 @@ class PopupWatcher(threading.Thread):
             if on_board and popup.off_board:
                 popup.streak, popup.seen_since = 0, 0.0
                 continue
+            if now < popup.dropped_until:
+                popup.streak, popup.seen_since = 0, 0.0
+                continue
             if popup.start_level and (self.resting.is_set() or self.idle.is_set()):
                 popup.streak, popup.seen_since = 0, 0.0
                 continue
@@ -823,6 +834,7 @@ class PopupWatcher(threading.Thread):
             else:
                 popup.streak = 0
                 popup.seen_since = 0.0
+                popup.unlocated = 0
                 self._forget_taps(popup, now)
         if now - self._last_score_log > 1.0:
             self._last_score_log = now
@@ -872,10 +884,10 @@ class PopupWatcher(threading.Thread):
             self._last_tap = now
             if self._tap_run is None or self._tap_run[0] != popup.name:
                 self._tap_run, self._tap_run_told = (popup.name, now), False
-            self._act(popup, center)
+            self._act(popup, center, now)
         return True
 
-    def _act(self, popup: Popup, center: tuple[int, int]) -> None:
+    def _act(self, popup: Popup, center: tuple[int, int], now: float | None = None) -> None:
         """Do the entry's action. A then_back entry taps its target first, presses Back
         if it is still up on the next try, and then leaves it alone: a coach bubble that
         survives both never gets a third tap that could spend coins."""
@@ -893,13 +905,30 @@ class PopupWatcher(threading.Thread):
         popup.last_kind = "tap"
         target = popup.tap_point or center
         if isinstance(target, str):
-            anchor = getattr(self.device, "anchor", lambda _: None)(target.lstrip("@"))
-            if anchor is None:
-                log("WARN", f"{popup.name}: anchor {target} not known yet; tapping the match")
-            target = anchor or center
+            anchor = getattr(self.device, "anchor", lambda *_: None)(target.lstrip("@"), self.shot)
+            if anchor is None:  # not located on this phone yet: the match's centre is no guess
+                self._anchor_missing(popup, target, time.monotonic() if now is None else now)
+                return
+            popup.unlocated = 0
+            target = anchor
         if popup.tap_offset is not None:
             target = (center[0] + popup.tap_offset[0], center[1] + popup.tap_offset[1])
         self.device.tap(*target, why=popup.name, allow=popup.allow)
+
+    def _anchor_missing(self, popup: Popup, target: str, now: float) -> None:
+        """An entry's "@anchor" tap point is not on this frame. Look a few times; then drop
+        the entry for a while so a screen that never shows its target doesn't hold the bot."""
+        popup.unlocated += 1
+        if popup.unlocated < ANCHOR_LOOKS:
+            log("WARN", f"{popup.name}: {target} not located yet; not tapping blind")
+            return
+        popup.unlocated = 0
+        popup.dropped_until = now + ANCHOR_DROP_S
+        log(
+            "WARN",
+            f"{popup.name}: {target} not located after {ANCHOR_LOOKS} looks; dropping it for "
+            f"{ANCHOR_DROP_S:.0f} s and playing on",
+        )
 
     def _forget_taps(self, popup: Popup, now: float) -> None:
         """The entry has been gone a while: log which action it last took, and start over."""
@@ -1087,6 +1116,9 @@ class PopupWatcher(threading.Thread):
 
     def _zones_due(self, y: int | None) -> None:
         """Runs just before an input is checked against the no-tap zones."""
+        # The booster-row zone holds only while a level's board is on screen. A stale
+        # below_board_y refused the home screen's Play Level tap for minutes (run4).
+        self.device.board_in_view = self.board_visible and self.expected_panel is not None
         # The bot's first swipes on a new board can come before the next tick drops
         # an off-board popup's zone (see _handle_popups).
         if self.board_visible and self.expected_panel is not None:

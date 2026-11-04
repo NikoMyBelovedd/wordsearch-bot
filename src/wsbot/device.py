@@ -18,12 +18,17 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from pathlib import Path
 
 import cv2
 import numpy as np
 
+from .debug import snap
+from .hintbutton import find_hint
+from .imgio import imread
 from .log import log
 from .shot import Shot
+from .topbar import TopBar, locate
 
 CALIB_W, CALIB_H = 1080, 2400
 # The Android user the game is installed in (a work profile is 10, Samsung's Secure
@@ -36,11 +41,18 @@ U2_TIMEOUT_S = 2.5
 # controls that spend coins or leave the level. The star is the (free) bonus-word jar;
 # only a popup entry that names it in "allow" may tap it. The booster row (ads, burst
 # hint, lightbulb, shuffle) is covered by the dynamic below-board zone during levels.
+# Until the top bar is found on a frame (topbar.py) these are the fallback: a band over
+# the buttons' row, generous in height (the bar sits about 138 px down on every phone).
+# Once found, topbar_zones() puts the zones on the buttons themselves.
 FORBIDDEN_ZONES: dict[str, tuple[int, int, int, int]] = {
-    "back_button": (30, 140, 160, 270),
-    "star_bonus_jar": (165, 140, 280, 270),
-    "coins_and_shop": (700, 140, 1050, 270),
+    "back_button": (30, 60, 160, 240),
+    "star_bonus_jar": (165, 60, 280, 240),
+    "coins_and_shop": (700, 60, 1050, 240),
 }
+BUTTON_HALF = 65  # half-size of a top-bar button's no-tap zone (the buttons are ~96 px)
+CART_SPAN = 310  # the coin counter and the cart: the zone reaches this far left of the cart
+ANCHOR_RETRY_S = 2.0  # look for the top bar this often
+ICON_DIR = Path(__file__).resolve().parents[2] / "templates" / "anchors"
 
 
 def parse_users(listing: str) -> list[int]:
@@ -64,6 +76,23 @@ def view_center(xml: str, resource_id: str) -> tuple[int, int] | None:
             left, top, right, bottom = map(int, bounds.groups())
             return (left + right) // 2, (top + bottom) // 2
     return None
+
+
+def topbar_zones(bar: TopBar | None) -> dict[str, tuple[int, int, int, int]]:
+    """No-tap zones around the top bar's buttons (the fallback strip without one)."""
+    if bar is None:
+        return dict(FORBIDDEN_ZONES)
+
+    def around(x: int, y: int) -> tuple[int, int, int, int]:
+        return (x - BUTTON_HALF, y - BUTTON_HALF, x + BUTTON_HALF, y + BUTTON_HALF)
+
+    zones = {"back_button": around(*bar.back), "star_bonus_jar": around(*bar.star)}
+    if bar.cart is None:
+        zones["coins_and_shop"] = FORBIDDEN_ZONES["coins_and_shop"]
+    else:
+        cx, cy = bar.cart
+        zones["coins_and_shop"] = (cx - CART_SPAN, cy - BUTTON_HALF, CALIB_W, cy + BUTTON_HALF)
+    return zones
 
 
 def has_package(path_output: str) -> bool:
@@ -134,6 +163,9 @@ class BaseDevice:
     swipe_ms = 60  # fast-pass finger travel time
     dry_run = False
     below_board_y: int | None = None
+    # The watcher's latest look has a level board on screen (set in _zones_due). Without a
+    # watcher the zone holds as before.
+    board_in_view = True
     last_panel: tuple[int, int, int, int] | None = None  # board of the latest level
     refused = 0
 
@@ -159,7 +191,7 @@ class BaseDevice:
         self.sync_zones(y)
         zones = dict(self.zones)
         zones.update(self.__dict__.get("dynamic_zones", {}))
-        if self.below_board_y is not None:
+        if self.below_board_y is not None and self.board_in_view:
             zones["below_board"] = (0, self.below_board_y, *self.calib)
         for name, (x1, y1, x2, y2) in zones.items():
             if name != allow and x1 <= x <= x2 and y1 <= y <= y2:
@@ -213,6 +245,13 @@ class Device(BaseDevice):
         self.taps = 0
         self.swipes = 0
         self.refused = 0
+        self.zones = dict(FORBIDDEN_ZONES)  # narrowed to the top bar once it is found
+        self._topbar: TopBar | None = None
+        self._anchors: dict[str, tuple[int, int]] = {}  # "back", "star": calibration px
+        self._anchor_icons = {n: imread(ICON_DIR / f"{n}.png") for n in ("back", "star", "cart")}
+        self._hint_icon = imread(ICON_DIR / "hint.png")
+        self._last_anchor_try = 0.0
+        self._topbar_missed = False
         log("DEVICE", f"connected {serial} {w}x{h} dry_run={dry_run}")
 
     def adb(self, *args: str, timeout: float = 10.0) -> subprocess.CompletedProcess[bytes]:
@@ -252,6 +291,43 @@ class Device(BaseDevice):
         if img.shape[1] != CALIB_W or img.shape[0] != CALIB_H:
             img = cv2.resize(img, (CALIB_W, CALIB_H), interpolation=cv2.INTER_AREA)
         return img
+
+    def shot(self) -> Shot:
+        """The frame, and now and then a look for the top bar on it (see _find_topbar)."""
+        shot = super().shot()
+        now = time.monotonic()
+        if now - self._last_anchor_try >= ANCHOR_RETRY_S:
+            self._last_anchor_try = now
+            self._find_topbar(shot.calib)
+        return shot
+
+    def _find_topbar(self, img: np.ndarray) -> None:
+        """Locate the top bar on this frame. A frame without it keeps the last one found
+        (a popup can cover the bar); until one is found the strip fallback stays up."""
+        try:
+            bar, note = locate(img, self._anchor_icons)
+        except Exception as exc:
+            log("ERROR", f"top bar search failed: {exc!r}")
+            return
+        if bar is None:
+            if not self._topbar_missed and self._topbar is None:
+                self._topbar_missed = True
+                log("DIAG", f"top bar not found ({note}): no taps up there until it is")
+            return
+        if self._topbar is None:
+            log("DEVICE", f"top bar found: back {bar.back} star {bar.star} cart {bar.cart}")
+            snap("android_topbar", img, every_s=0)
+        self._topbar = bar
+        self._anchors = {"back": bar.back, "star": bar.star}
+        self.zones = topbar_zones(bar)
+
+    def anchor(self, name: str, shot: Shot | None = None) -> tuple[int, int] | None:
+        """A named tap point for popups.json "@name" tap points: the top bar's "back" or
+        "star", or "hint", the FREE hint button found on `shot` (the frame the entry matched).
+        None when it isn't there, so the entry doesn't tap."""
+        if name == "hint":
+            return None if shot is None else find_hint(shot.calib, self._hint_icon)
+        return self._anchors.get(name)
 
     def _u2_frame(self) -> np.ndarray | None:
         box: list[np.ndarray] = []
