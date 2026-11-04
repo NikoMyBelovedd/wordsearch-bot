@@ -203,7 +203,7 @@ def test_the_banner_does_not_tap_blind_before_the_star_is_found(popups):
 # ---- Daily Wisdom -----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["daily_wisdom.jpg", "daily_wisdom_2.jpg"])
+@pytest.mark.parametrize("name", ["daily_wisdom.jpg", "daily_wisdom_2.jpg", "daily_wisdom_3.jpg"])
 def test_daily_wisdom_is_closed_by_its_continue_button(name, popups):
     popup, score, center = top(popups, load(name))
     assert popup.name == "daily_wisdom_continue", (name, score)
@@ -216,7 +216,7 @@ def test_daily_wisdom_is_closed_by_its_continue_button(name, popups):
 def test_no_other_android_frame_matches_daily_wisdom(popups):
     entry = next(p for p in popups if p.name == "daily_wisdom_continue")
     for path in sorted(ANDROID.glob("*.jpg")):
-        if path.name.startswith("daily_wisdom"):
+        if "daily_wisdom" in path.name:
             continue
         shot = Shot(1, cv2.imread(str(path)), CALIB)
         found = watcher_mod.match(shot.small, entry, shot.coarse_as(entry.coarse_look))
