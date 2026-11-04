@@ -29,7 +29,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import sysalert
+from . import sysalert, tutorial
 from .board import covered_below
 from .debug import dbg, snap, snap_due
 from .device import Device
@@ -117,6 +117,14 @@ UNKNOWN_GIVE_UP_S = 120.0
 RELAUNCH_COOLDOWN_S = 30.0  # home screen seen again right after a relaunch: give it time
 UNKNOWN_DUMP_MIN_S = 10.0  # unknown screens are saved once each, at most this often
 UNKNOWN_SAME = 6.0  # thumbnails this close (mean abs difference) are the same screen
+# A tutorial whose only way out is tapping what its white arrow points at (tutorial.py):
+# looked for once the board has been hidden this long with no known popup, at most every
+# TUTORIAL_EVERY_S; its target is tapped at most every TUTORIAL_TAP_GAP_S, and at most
+# TUTORIAL_MAX_TAPS times on one screen (then the unknown-screen recovery takes over).
+TUTORIAL_AFTER_S = 1.5
+TUTORIAL_EVERY_S = 1.0
+TUTORIAL_TAP_GAP_S = 2.5
+TUTORIAL_MAX_TAPS = 3
 # The iPhone's own alerts (see sysalert.py): looked for this often while the board isn't
 # in view (~10 ms a look); acted on once one has sat still this long (it fades and
 # zooms in), at most every ALERT_TAP_GAP_S, and never within ALERT_HOLDOFF_S of any
@@ -561,6 +569,8 @@ class PopupWatcher(threading.Thread):
         self._frame_cond = threading.Condition()
         self._hidden_since: float | None = None
         self._last_unknown_dump = 0.0
+        self._tutorial_looked = self._tutorial_tapped = 0.0
+        self._tutorial_taps = 0
         self._last_app_check = 0.0
         self._last_score_log = 0.0
         # Stuck on screens it doesn't know (see _escalate) and the end of the line
@@ -721,8 +731,10 @@ class PopupWatcher(threading.Thread):
             self._tap_run = None
         if matched or self.board_visible or alert:
             self._hidden_since = None
+            self._tutorial_taps = 0
         else:
             self._check_unknown(shot, now)
+            self._check_tutorial(shot, now)
         self._escalate(now)
 
         took = time.monotonic() - t0
@@ -1036,6 +1048,27 @@ class PopupWatcher(threading.Thread):
         else:
             popup.streak = 0
         self.device.set_dynamic_zone(popup.name, zone)
+
+    def _check_tutorial(self, shot: Shot, now: float) -> None:
+        """A tutorial that closes only when the target its white arrow points at is tapped
+        (tutorial.py): tap that target. Only while the board is hidden and no known popup
+        is up; a blind clear tap doesn't close these, and the game restarts after 40 s."""
+        if self._hidden_since is None or now - self._hidden_since < TUTORIAL_AFTER_S:
+            return
+        if now - self._tutorial_looked < TUTORIAL_EVERY_S:
+            return
+        self._tutorial_looked = now
+        target = tutorial.find_target(shot.calib)
+        if target is None or self._tutorial_taps >= TUTORIAL_MAX_TAPS:
+            return
+        if now - self._tutorial_tapped < TUTORIAL_TAP_GAP_S:
+            return
+        if getattr(self.device, "game_missing", lambda: False)() or not self.blind_taps_ok():
+            return
+        self._tutorial_tapped = now
+        self._tutorial_taps += 1
+        log("WATCHER", f"tutorial: a white arrow points at {target.center}: tapping it")
+        self.device.tap(*target.center, why="tutorial arrow target")
 
     def _check_unknown(self, shot: Shot, now: float) -> None:
         if self._hidden_since is None:

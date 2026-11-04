@@ -459,6 +459,7 @@ Crop from **inside** the button (x, y, width, height, in the full-screen picture
 | `letters.py` | Glyph reading (64×64 templates plus Tesseract). |
 | `solver.py` | Dictionary prefix search. |
 | `watcher.py` | Popup watcher thread and frame owner. |
+| `tutorial.py` | Tutorial arrows: on a dimmed screen, taps the one undimmed target a white arrow points at. |
 | `bot.py` | Main loop, pass ladder, liveness probe, recovery. |
 | `goal.py`, `schedule.py` | Progress tracking (atomic JSON) and daily pacing. |
 | `tui.py`, `cli.py` | Terminal UI and command-line entry point. |
