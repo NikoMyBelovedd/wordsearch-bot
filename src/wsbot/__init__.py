@@ -2,7 +2,7 @@
 
 import os
 
-__version__ = "0.1.0"
+__version__ = "1.2.6"
 
 # One bot per phone on one computer: math libraries get one thread each (before numpy
 # loads; OpenBLAS also commits memory per thread).
