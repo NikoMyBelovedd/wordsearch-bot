@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" alt="wordsearch-bot: auto-solver for Word Search Explorer on Android and iPhone" width="100%">
+  </picture>
+</p>
+
 <div align="center">
 
 # wordsearch-bot

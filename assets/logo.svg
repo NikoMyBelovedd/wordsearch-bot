@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="wordsearch-bot logo">
+  <title>wordsearch-bot logo</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#151517" stroke="#2e2e34" stroke-width="2"/>
+  <g fill="#52525b">
+    <circle cx="68" cy="68" r="9"/>
+    <circle cx="108" cy="68" r="9"/>
+    <circle cx="148" cy="68" r="9"/>
+    <circle cx="188" cy="68" r="9"/>
+    <circle cx="188" cy="108" r="9"/>
+    <circle cx="68" cy="148" r="9"/>
+    <circle cx="108" cy="148" r="9"/>
+    <circle cx="148" cy="148" r="9"/>
+    <circle cx="188" cy="148" r="9"/>
+    <circle cx="68" cy="188" r="9"/>
+    <circle cx="108" cy="188" r="9"/>
+    <circle cx="148" cy="188" r="9"/>
+    <circle cx="188" cy="188" r="9"/>
+  </g>
+  <rect x="50" y="90" width="116" height="36" rx="18" fill="none" stroke="#1667d9" stroke-width="8"/>
+  <g fill="#1667d9">
+    <circle cx="68" cy="108" r="9"/>
+    <circle cx="108" cy="108" r="9"/>
+    <circle cx="148" cy="108" r="9"/>
+  </g>
+</svg>
