@@ -441,7 +441,7 @@ def test_component_stats_are_opencvs():
     for img in frames:
         mini = cv2.resize(native_of(img), (NATIVE[0] // 2, NATIVE[1] // 2))
         white = cv2.inRange(mini, (235,) * 3, (255,) * 3)
-        white = cv2.morphologyEx(white, cv2.MORPH_OPEN, _kernel(mini.shape[1] / CALIB[0]))
+        white = cv2.morphologyEx(white, cv2.MORPH_OPEN, _kernel(mini.shape[1]))
         n, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=4)
         if n < 2:
             assert _largest(white) is None
