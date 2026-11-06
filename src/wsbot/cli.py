@@ -74,7 +74,10 @@ def main() -> None:
     )
     p.add_argument("--headless", action="store_true", help="run without the TUI")
     p.add_argument(
-        "--mode", choices=["play", "custom", "single"], default="play", help="--headless goal"
+        "--mode",
+        choices=["play", "nonstop", "custom", "single"],
+        default="nonstop",
+        help="--headless goal: nonstop (or play, the same) = no pace; custom = --per-day levels a day",
     )
     p.add_argument(
         "--per-day", type=int, help="--mode custom: levels per day (default: saved setting)"
@@ -135,8 +138,8 @@ def make_goal(mode: str, per_day: int | None, serial: str, fast: bool = False):
         if per_day:
             schedule.per_day = per_day
         goal = Goal.custom(progress, schedule)
-    else:
-        goal = Goal.play(progress)
+    else:  # "play" too: older AutomationHQ versions send it, and it no longer forces a pace
+        goal = Goal.nonstop(progress)
     if fast and goal.schedule:
         goal.schedule = replace(goal.schedule, hours_min=0, hours_max=0, break_every_max=0)
     return goal

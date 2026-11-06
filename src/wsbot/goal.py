@@ -113,6 +113,12 @@ class Goal:
         )
 
     @classmethod
+    def nonstop(cls, progress: Progress) -> Goal:
+        """As fast as it can, no daily number, no breaks: the headless default (owner 11/5: no
+        forced pacing; a pace is `--mode custom --per-day N`, which AutomationHQ asks about)."""
+        return cls("nonstop", "Nonstop · no pace", None, None, progress)
+
+    @classmethod
     def custom(cls, progress: Progress, schedule: Schedule) -> Goal:
         schedule.per_day = max(CUSTOM_MIN, min(CUSTOM_MAX, schedule.per_day))
         title = f"Custom · {schedule.per_day:,} levels/day"
